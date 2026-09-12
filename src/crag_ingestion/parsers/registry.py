@@ -24,6 +24,10 @@ class ParserRegistry:
     def supported_extensions(self) -> tuple[str, ...]:
         return tuple(sorted(self._parsers))
 
+    @property
+    def parser_signatures(self) -> tuple[str, ...]:
+        return tuple(sorted({parser.signature for parser in self._parsers.values()}))
+
     def parser_for(self, path: Path) -> DocumentParser:
         parser = self._parsers.get(path.suffix.lower())
         if parser is None:
@@ -38,6 +42,9 @@ def default_registry(config: IngestionConfig) -> ParserRegistry:
             TextParser(),
             MarkdownParser(),
             DocxParser(config.max_docx_uncompressed_bytes),
-            PdfParser(config.max_pdf_pages),
+            PdfParser(
+                config.max_pdf_pages,
+                password=config.pdf_password,
+            ),
         ]
     )

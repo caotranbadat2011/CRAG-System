@@ -9,7 +9,10 @@ from ..models import ParsedDocument
 class DocumentParser(ABC):
     extensions: tuple[str, ...] = ()
 
-    @abstractmethod
-    def parse(self, path: Path) -> ParsedDocument:
-        raise NotImplementedError
+    @property
+    def signature(self) -> str:
+        return f"{type(self).__module__}.{type(self).__qualname__}"
 
+    @abstractmethod
+    def parse(self, path: Path, *, source_path: Path | None = None) -> ParsedDocument:
+        raise NotImplementedError

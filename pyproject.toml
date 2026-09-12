@@ -9,11 +9,18 @@ description = "Auditable document ingestion pipeline for a Corrective RAG system
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "charset-normalizer>=3.0,<4",
+  "markdown-it-py>=2.2,<5",
+  "mdit-py-plugins>=0.3,<1",
+  "pdfplumber>=0.11,<1",
+  "Pillow>=10,<13",
   "pypdf>=5.0,<7",
+  "PyYAML>=6.0,<7",
+  "qdrant-client>=1.15,<2",
+  "sentence-transformers>=3.0,<6",
 ]
 
 [project.optional-dependencies]
-semantic = ["sentence-transformers>=3.0,<6"]
 dev = ["pytest>=8.0", "pytest-cov>=5.0"]
 
 [project.scripts]
@@ -26,4 +33,3 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
-

@@ -32,12 +32,21 @@ class IngestionConfig:
     data_dir: Path = Path("data")
     max_file_bytes: int = 50 * 1024 * 1024
     max_pdf_pages: int = 2_000
+    pdf_password: str | None = field(default=None, repr=False)
     max_docx_uncompressed_bytes: int = 200 * 1024 * 1024
-    embedding_provider: str = "hash"
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    embedding_dimensions: int = 384
+    qdrant_url: str | None = None
+    qdrant_api_key: str | None = field(default=None, repr=False)
+    qdrant_collection: str = "crag_chunks"
+    qdrant_timeout: int = 30
     cleaning: CleaningConfig = field(default_factory=CleaningConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
+
+    def __post_init__(self) -> None:
+        if not self.qdrant_collection.strip():
+            raise ValueError("qdrant_collection cannot be empty")
+        if self.qdrant_timeout <= 0:
+            raise ValueError("qdrant_timeout must be positive")
 
     @property
     def raw_dir(self) -> Path:
@@ -48,6 +57,5 @@ class IngestionConfig:
         return self.data_dir / "processed"
 
     @property
-    def index_path(self) -> Path:
-        return self.data_dir / "index" / "crag.sqlite3"
-
+    def qdrant_path(self) -> Path:
+        return self.data_dir / "qdrant"

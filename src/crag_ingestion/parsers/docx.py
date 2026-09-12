@@ -86,7 +86,7 @@ class DocxParser(DocumentParser):
         self.extract_images = extract_images
         self.repair_run_boundaries = repair_run_boundaries
 
-    def parse(self, path: Path) -> ParsedDocument:
+    def parse(self, path: Path, *, source_path: Path | None = None) -> ParsedDocument:
         warnings: list[str] = []
         try:
             with zipfile.ZipFile(path) as archive:

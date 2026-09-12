@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable
@@ -11,7 +10,7 @@ from .cleaning import DocumentCleaner
 from .config import IngestionConfig
 from .embeddings import Embedder, create_embedder
 from .exceptions import EmptyDocumentError, FileTooLargeError, IngestionError
-from .index import SQLiteVectorIndex
+from .index import QdrantVectorIndex
 from .models import IngestionResult, SearchResult
 from .parsers import ParserRegistry, default_registry
 from .storage import ArtifactStore
@@ -21,7 +20,7 @@ from .validation import ValidationReport, validate_index
 
 class IngestionPipeline:
     # Bump whenever parsing semantics change so existing documents are rebuilt.
-    PIPELINE_VERSION = "2"
+    PIPELINE_VERSION = "7"
 
     def __init__(
         self,
@@ -29,7 +28,7 @@ class IngestionPipeline:
         *,
         registry: ParserRegistry | None = None,
         embedder: Embedder | None = None,
-        index: SQLiteVectorIndex | None = None,
+        index: QdrantVectorIndex | None = None,
     ) -> None:
         self.config = config or IngestionConfig()
         self.registry = registry or default_registry(self.config)
@@ -37,7 +36,13 @@ class IngestionPipeline:
         self.cleaner = DocumentCleaner(self.config.cleaning)
         self.chunker = StructuralChunker(self.config.chunking)
         self.artifacts = ArtifactStore(self.config.raw_dir, self.config.processed_dir)
-        self.index = index or SQLiteVectorIndex(self.config.index_path)
+        self.index = index or QdrantVectorIndex(
+            path=self.config.qdrant_path,
+            url=self.config.qdrant_url,
+            api_key=self.config.qdrant_api_key,
+            collection_name=self.config.qdrant_collection,
+            timeout=self.config.qdrant_timeout,
+        )
         self._owns_index = index is None
 
     @property
@@ -48,7 +53,7 @@ class IngestionPipeline:
             "chunking": asdict(self.config.chunking),
             "embedder": self.embedder.name,
             "dimensions": self.embedder.dimensions,
-            "parsers": self.registry.supported_extensions,
+            "parsers": self.registry.parser_signatures,
         }
         return hashlib.sha256(canonical_json(settings).encode("utf-8")).hexdigest()
 
@@ -87,11 +92,11 @@ class IngestionPipeline:
                 status="skipped",
                 block_count=existing["block_count"],
                 chunk_count=existing["chunk_count"],
-                warnings=json.loads(existing["warnings_json"]),
+                warnings=list(existing["warnings"]),
             )
 
         stored_path = self.artifacts.store_raw(document_id, content_hash, source)
-        document = parser.parse(stored_path)
+        document = parser.parse(stored_path, source_path=source)
         document.source_path = source
         document.metadata.update(
             {"original_filename": source.name, "source_size_bytes": size}

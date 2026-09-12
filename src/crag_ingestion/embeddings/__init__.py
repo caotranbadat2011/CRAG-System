@@ -1,6 +1,5 @@
 from .base import Embedder
 from .factory import create_embedder
-from .hashing import HashingEmbedder
+from .sentence_transformer import SentenceTransformerEmbedder
 
-__all__ = ["Embedder", "HashingEmbedder", "create_embedder"]
-
+__all__ = ["Embedder", "SentenceTransformerEmbedder", "create_embedder"]

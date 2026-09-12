@@ -13,12 +13,30 @@ from .pipeline import IngestionPipeline
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="crag-ingest", description="CRAG document ingestion pipeline")
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Artifact and index directory")
-    parser.add_argument("--embedding-provider", choices=("hash", "sentence-transformers"), default="hash")
-    parser.add_argument("--embedding-model", default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    parser.add_argument("--dimensions", type=int, default=384, help="Dimensions for hash embeddings")
+    parser.add_argument(
+        "--embedding-model",
+        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        help="Sentence Transformers model name or local model path",
+    )
     parser.add_argument("--max-chars", type=int, default=1_200)
     parser.add_argument("--overlap-chars", type=int, default=180)
     parser.add_argument("--min-chars", type=int, default=120)
+    parser.add_argument(
+        "--pdf-password-file",
+        type=Path,
+        help="Read a PDF password from a file instead of exposing it in command history",
+    )
+    parser.add_argument(
+        "--qdrant-url",
+        help="Qdrant server URL; omit to use embedded local storage under DATA_DIR/qdrant",
+    )
+    parser.add_argument(
+        "--qdrant-api-key-file",
+        type=Path,
+        help="Read the Qdrant API key from a file",
+    )
+    parser.add_argument("--qdrant-collection", default="crag_chunks")
+    parser.add_argument("--qdrant-timeout", type=int, default=30)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     ingest = subparsers.add_parser("ingest", help="Ingest one file or a directory")
@@ -36,11 +54,20 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _config(args: argparse.Namespace) -> IngestionConfig:
+    pdf_password = None
+    if args.pdf_password_file:
+        pdf_password = args.pdf_password_file.read_text(encoding="utf-8").rstrip("\r\n")
+    qdrant_api_key = None
+    if args.qdrant_api_key_file:
+        qdrant_api_key = args.qdrant_api_key_file.read_text(encoding="utf-8").strip()
     return IngestionConfig(
         data_dir=args.data_dir,
-        embedding_provider=args.embedding_provider,
+        pdf_password=pdf_password,
         embedding_model=args.embedding_model,
-        embedding_dimensions=args.dimensions,
+        qdrant_url=args.qdrant_url,
+        qdrant_api_key=qdrant_api_key,
+        qdrant_collection=args.qdrant_collection,
+        qdrant_timeout=args.qdrant_timeout,
         chunking=ChunkingConfig(args.max_chars, args.overlap_chars, args.min_chars),
     )
 
@@ -82,4 +109,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

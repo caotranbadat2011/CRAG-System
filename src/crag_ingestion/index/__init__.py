@@ -1,4 +1,3 @@
-from .sqlite_index import SQLiteVectorIndex
+from .qdrant_index import QdrantVectorIndex
 
-__all__ = ["SQLiteVectorIndex"]
-
+__all__ = ["QdrantVectorIndex"]

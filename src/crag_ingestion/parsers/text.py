@@ -3,73 +3,53 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ..exceptions import ParseError
 from ..models import ParsedDocument, TextBlock
 from .base import DocumentParser
-
-_MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
-
-
-def _read_text(path: Path) -> str:
-    raw = path.read_bytes()
-    for encoding in ("utf-8-sig", "utf-8", "utf-16", "cp1258", "cp1252"):
-        try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise ParseError(f"Unable to decode text file: {path}")
+from .decoding import read_text_safely
 
 
 class TextParser(DocumentParser):
     extensions = (".txt",)
 
-    def parse(self, path: Path) -> ParsedDocument:
-        text = _read_text(path)
-        paragraphs = re.split(r"\n\s*\n", text)
-        blocks = [
-            TextBlock(text=p, ordinal=i)
-            for i, p in enumerate(paragraphs)
-            if p.strip()
-        ]
-        return ParsedDocument(path, "text/plain", blocks)
-
-
-class MarkdownParser(DocumentParser):
-    extensions = (".md", ".markdown")
-
-    def parse(self, path: Path) -> ParsedDocument:
-        lines = _read_text(path).splitlines()
-        headings: list[str] = []
+    def parse(self, path: Path, *, source_path: Path | None = None) -> ParsedDocument:
+        decoded = read_text_safely(path)
+        source = source_path or path
         blocks: list[TextBlock] = []
-        buffer: list[str] = []
-
-        def flush() -> None:
-            text = "\n".join(buffer).strip()
-            if text:
-                blocks.append(
-                    TextBlock(text=text, heading_path=tuple(headings), ordinal=len(blocks))
+        for match in re.finditer(r"(.*?)(?:\n[ \t]*\n|\Z)", decoded.text, re.DOTALL):
+            raw_text = match.group(1)
+            if not raw_text.strip():
+                continue
+            leading = len(raw_text) - len(raw_text.lstrip())
+            trailing = len(raw_text.rstrip())
+            start = match.start(1) + leading
+            end = match.start(1) + trailing
+            text = decoded.text[start:end]
+            start_line = decoded.text.count("\n", 0, start) + 1
+            end_line = decoded.text.count("\n", 0, end) + 1
+            blocks.append(
+                TextBlock(
+                    text=text,
+                    ordinal=len(blocks),
+                    metadata={
+                        "source": {
+                            "start_line": start_line,
+                            "end_line": end_line,
+                            "start_char": start,
+                            "end_char": end,
+                        }
+                    },
                 )
-            buffer.clear()
+            )
+        return ParsedDocument(
+            source,
+            "text/plain",
+            blocks,
+            metadata={"encoding": decoded.encoding},
+            warnings=decoded.warnings,
+        )
 
-        for line in lines:
-            match = _MARKDOWN_HEADING.match(line.strip())
-            if match:
-                flush()
-                level = len(match.group(1))
-                headings[:] = headings[: level - 1]
-                headings.append(match.group(2).strip())
-                blocks.append(
-                    TextBlock(
-                        text=match.group(2).strip(),
-                        kind="heading",
-                        heading_path=tuple(headings),
-                        ordinal=len(blocks),
-                    )
-                )
-            elif not line.strip():
-                flush()
-            else:
-                buffer.append(line)
-        flush()
-        return ParsedDocument(path, "text/markdown", blocks)
 
+# Preserve the original public import path.
+from .markdown import MarkdownParser  # noqa: E402
+
+__all__ = ["MarkdownParser", "TextParser"]
