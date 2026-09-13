@@ -1,8 +1,14 @@
 import json
 from pathlib import Path
 
-from crag_ingestion.cli import main
+from crag_ingestion.cli import _parser, main
 from crag_ingestion.embeddings.base import Embedder
+
+
+def test_cli_defaults_to_bge_m3_and_its_collection() -> None:
+    args = _parser().parse_args(["list"])
+    assert args.embedding_model == "BAAI/bge-m3"
+    assert args.qdrant_collection == "crag_bge_m3"
 
 
 def test_cli_ingest_query_list_and_validate(

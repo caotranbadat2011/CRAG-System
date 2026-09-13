@@ -5,7 +5,12 @@ import json
 import sys
 from pathlib import Path
 
-from .config import ChunkingConfig, IngestionConfig
+from .config import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_QDRANT_COLLECTION,
+    ChunkingConfig,
+    IngestionConfig,
+)
 from .exceptions import IngestionError
 from .pipeline import IngestionPipeline
 
@@ -15,7 +20,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Artifact and index directory")
     parser.add_argument(
         "--embedding-model",
-        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        default=DEFAULT_EMBEDDING_MODEL,
         help="Sentence Transformers model name or local model path",
     )
     parser.add_argument("--max-chars", type=int, default=1_200)
@@ -35,7 +40,7 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="Read the Qdrant API key from a file",
     )
-    parser.add_argument("--qdrant-collection", default="crag_chunks")
+    parser.add_argument("--qdrant-collection", default=DEFAULT_QDRANT_COLLECTION)
     parser.add_argument("--qdrant-timeout", type=int, default=30)
     subparsers = parser.add_subparsers(dest="command", required=True)
 

@@ -49,6 +49,7 @@ def _replace(
 
 def test_qdrant_upsert_filter_and_document_replacement(tmp_path: Path) -> None:
     with QdrantVectorIndex(path=tmp_path / "qdrant") as index:
+        assert index.collection_name == "crag_bge_m3"
         first = _chunk("1" * 32, "doc-1", 0, "alpha")
         second = _chunk("2" * 32, "doc-2", 0, "beta")
         _replace(

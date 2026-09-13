@@ -59,3 +59,9 @@ def test_factory_always_builds_sentence_transformer(monkeypatch: pytest.MonkeyPa
     config = IngestionConfig(embedding_model="custom/model")
 
     assert factory.create_embedder(config) is sentinel
+
+
+def test_default_embedding_model_and_collection() -> None:
+    config = IngestionConfig()
+    assert config.embedding_model == "BAAI/bge-m3"
+    assert config.qdrant_collection == "crag_bge_m3"

@@ -8,6 +8,7 @@ from uuid import UUID
 
 from qdrant_client import QdrantClient, models
 
+from ..config import DEFAULT_QDRANT_COLLECTION
 from ..models import Chunk, SearchResult
 
 
@@ -20,7 +21,7 @@ class QdrantVectorIndex:
         path: Path | None = None,
         url: str | None = None,
         api_key: str | None = None,
-        collection_name: str = "crag_chunks",
+        collection_name: str = DEFAULT_QDRANT_COLLECTION,
         timeout: int = 30,
         client: QdrantClient | None = None,
     ) -> None:

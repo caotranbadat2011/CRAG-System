@@ -62,7 +62,7 @@ For a Qdrant server, pass its URL and optionally keep the API key in a file:
 ```powershell
 python -m crag_ingestion `
   --qdrant-url http://localhost:6333 `
-  --qdrant-collection crag_chunks `
+  --qdrant-collection crag_bge_m3 `
   ingest .\documents
 
 python -m crag_ingestion `
@@ -76,11 +76,17 @@ chunk identifiers, source and artifact paths, content and pipeline hashes, model
 text, heading path, pages, parser metadata, and provenance. Collections use
 Cosine distance and are created from the Sentence Transformer model dimension.
 
-Sentence Transformers is the only embedding backend. The default multilingual
-model is `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`; select a
+Sentence Transformers is the only embedding backend. The default model is
+`BAAI/bge-m3`; select a
 different Sentence Transformers model or a local model directory with
 `--embedding-model`. Vector dimensions are read from the loaded model and cannot
 be configured independently.
+
+The default Qdrant collection is `crag_bge_m3`. Existing collections from the
+previous embedding model are left untouched, and their vectors are not migrated.
+Re-ingest source documents to populate the new collection. An explicitly selected
+collection with an incompatible vector dimension will be rejected rather than
+overwritten.
 
 Keep the same model for ingestion and querying. A change to cleaning, chunking,
 parser support, model, or model-derived dimensions changes the pipeline signature;

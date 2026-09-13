@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_QDRANT_COLLECTION = "crag_bge_m3"
+
+
 @dataclass(frozen=True, slots=True)
 class CleaningConfig:
     unicode_form: str = "NFC"
@@ -34,10 +38,10 @@ class IngestionConfig:
     max_pdf_pages: int = 2_000
     pdf_password: str | None = field(default=None, repr=False)
     max_docx_uncompressed_bytes: int = 200 * 1024 * 1024
-    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
     qdrant_url: str | None = None
     qdrant_api_key: str | None = field(default=None, repr=False)
-    qdrant_collection: str = "crag_chunks"
+    qdrant_collection: str = DEFAULT_QDRANT_COLLECTION
     qdrant_timeout: int = 30
     cleaning: CleaningConfig = field(default_factory=CleaningConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
