@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "charset-normalizer>=3.0,<4",
+  "FlagEmbedding>=1.2.11,<2",
   "markdown-it-py>=2.2,<5",
   "mdit-py-plugins>=0.3,<1",
   "pdfplumber>=0.11,<1",
@@ -17,7 +18,6 @@ dependencies = [
   "pypdf>=5.0,<7",
   "PyYAML>=6.0,<7",
   "qdrant-client>=1.15,<2",
-  "sentence-transformers>=3.0,<6",
 ]
 
 [project.optional-dependencies]

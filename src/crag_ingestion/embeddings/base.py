@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class EmbeddingVector:
+    dense: list[float]
+    lexical_weights: dict[int, float]
 
 
 class Embedder(ABC):
@@ -15,5 +22,5 @@ class Embedder(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str]) -> list[EmbeddingVector]:
         raise NotImplementedError

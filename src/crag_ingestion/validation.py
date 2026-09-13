@@ -47,6 +47,13 @@ def validate_index(index: QdrantVectorIndex, check_files: bool = True) -> Valida
                 f"Expected Cosine distance, got {schema['distance']}",
             )
         )
+    if not schema["hybrid_vectors"]:
+        issues.append(
+            ValidationIssue(
+                "error", "qdrant_hybrid_schema",
+                "Collection must have named dense and sparse vectors",
+            )
+        )
     if schema["status"] not in {"green", "yellow"}:
         issues.append(
             ValidationIssue(
@@ -124,6 +131,31 @@ def validate_index(index: QdrantVectorIndex, check_files: bool = True) -> Valida
                             chunk_id,
                         )
                     )
+            sparse = row.get("sparse_vector")
+            if not isinstance(sparse, dict):
+                issues.append(ValidationIssue(
+                    "error", "sparse_vector_missing", "Sparse vector is missing",
+                    document_id, chunk_id,
+                ))
+            else:
+                indices = sparse.get("indices")
+                values = sparse.get("values")
+                if (
+                    not isinstance(indices, list) or not isinstance(values, list)
+                    or not indices or len(indices) != len(values)
+                    or len(indices) != len(set(indices))
+                    or any(not isinstance(value, int) or value < 0 for value in indices)
+                    or any(
+                        not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value <= 0
+                        for value in values
+                    )
+                ):
+                    issues.append(ValidationIssue(
+                        "error", "sparse_vector_invalid",
+                        "Sparse token IDs and lexical weights are invalid",
+                        document_id, chunk_id,
+                    ))
             text = row["text"]
             if not isinstance(text, str) or int(row["char_count"]) != len(text):
                 issues.append(

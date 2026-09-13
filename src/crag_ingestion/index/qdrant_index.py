@@ -9,6 +9,7 @@ from uuid import UUID
 from qdrant_client import QdrantClient, models
 
 from ..config import DEFAULT_QDRANT_COLLECTION
+from ..embeddings.base import EmbeddingVector
 from ..models import Chunk, SearchResult
 
 
@@ -57,6 +58,11 @@ class QdrantVectorIndex:
             raise ValueError("Qdrant vector size must be positive")
         if self.collection_exists():
             schema = self.collection_schema()
+            if not schema["hybrid_vectors"]:
+                raise ValueError(
+                    f"Qdrant collection '{self.collection_name}' has an incompatible vector schema; "
+                    "use a new hybrid collection and re-ingest documents"
+                )
             if schema["vector_size"] != vector_size:
                 raise ValueError(
                     f"Qdrant collection '{self.collection_name}' expects "
@@ -71,10 +77,10 @@ class QdrantVectorIndex:
 
         self.client.create_collection(
             collection_name=self.collection_name,
-            vectors_config=models.VectorParams(
-                size=vector_size,
-                distance=models.Distance.COSINE,
-            ),
+            vectors_config={
+                "dense": models.VectorParams(size=vector_size, distance=models.Distance.COSINE)
+            },
+            sparse_vectors_config={"sparse": models.SparseVectorParams()},
         )
         if self.url:
             for field_name in ("record_type", "document_id", "source_path", "embedding_model"):
@@ -93,20 +99,29 @@ class QdrantVectorIndex:
                 "vector_size": None,
                 "distance": None,
                 "points_count": 0,
+                "hybrid_vectors": False,
             }
         info = self.client.get_collection(self.collection_name)
         vector_config = info.config.params.vectors
-        if isinstance(vector_config, dict):
-            raise ValueError("Named vectors are not supported by this CRAG collection")
-        distance = getattr(vector_config.distance, "value", str(vector_config.distance))
+        sparse_config = info.config.params.sparse_vectors or {}
+        dense_config = vector_config.get("dense") if isinstance(vector_config, dict) else vector_config
+        distance = (
+            getattr(dense_config.distance, "value", str(dense_config.distance))
+            if dense_config is not None else None
+        )
         status = getattr(info.status, "value", str(info.status))
         count = self.client.count(self.collection_name, exact=True).count
         return {
             "exists": True,
             "status": status,
-            "vector_size": int(vector_config.size),
+            "vector_size": int(dense_config.size) if dense_config is not None else None,
             "distance": distance,
             "points_count": int(count),
+            "hybrid_vectors": (
+                isinstance(vector_config, dict)
+                and set(vector_config) == {"dense"}
+                and set(sparse_config) == {"sparse"}
+            ),
         }
 
     def is_current(self, document_id: str, content_hash: str, pipeline_signature: str) -> bool:
@@ -143,12 +158,18 @@ class QdrantVectorIndex:
         warnings: list[str],
         block_count: int,
         chunks: list[Chunk],
-        vectors: list[list[float]],
+        vectors: list[EmbeddingVector],
     ) -> None:
         if len(chunks) != len(vectors):
             raise ValueError("Every chunk must have exactly one vector")
-        if any(len(vector) != embedding_dimensions for vector in vectors):
+        if any(len(vector.dense) != embedding_dimensions for vector in vectors):
             raise ValueError("Embedding dimension mismatch")
+        if any(
+            not any(vector.dense) or not all(math.isfinite(value) for value in vector.dense)
+            for vector in vectors
+        ):
+            raise ValueError("Every chunk must have a finite, nonzero dense vector")
+        sparse_vectors = [self._sparse_vector(vector) for vector in vectors]
         self.ensure_collection(embedding_dimensions)
 
         existing_ids = self._point_ids(self._filter(source_path=source_path))
@@ -174,7 +195,7 @@ class QdrantVectorIndex:
         points = [
             models.PointStruct(
                 id=UUID(hex=chunk.chunk_id),
-                vector=vector,
+                vector={"dense": vector.dense, "sparse": sparse},
                 payload={
                     **document_payload,
                     "chunk_id": chunk.chunk_id,
@@ -186,7 +207,7 @@ class QdrantVectorIndex:
                     "metadata": chunk.metadata,
                 },
             )
-            for chunk, vector in zip(chunks, vectors, strict=True)
+            for chunk, vector, sparse in zip(chunks, vectors, sparse_vectors, strict=True)
         ]
         self.client.upsert(
             collection_name=self.collection_name,
@@ -204,26 +225,43 @@ class QdrantVectorIndex:
 
     def search(
         self,
-        query_vector: list[float],
+        query_vector: EmbeddingVector,
         limit: int = 5,
         document_id: str | None = None,
         embedding_model: str | None = None,
     ) -> list[SearchResult]:
-        if limit <= 0 or not query_vector or not any(query_vector) or not self.collection_exists():
+        if (limit <= 0 or not any(query_vector.dense) or not query_vector.lexical_weights
+                or not self.collection_exists()):
             return []
         schema = self.collection_schema()
-        if schema["vector_size"] != len(query_vector):
+        if not schema["hybrid_vectors"]:
+            raise ValueError("Qdrant collection does not have dense and sparse named vectors")
+        if schema["vector_size"] != len(query_vector.dense):
             raise ValueError(
-                f"Query vector has {len(query_vector)} dimensions; Qdrant collection "
+                f"Query vector has {len(query_vector.dense)} dimensions; Qdrant collection "
                 f"expects {schema['vector_size']}"
             )
+        query_filter = self._filter(
+            document_id=document_id, embedding_model=embedding_model
+        )
+        prefetch_limit = max(limit * 4, 20)
         response = self.client.query_points(
             collection_name=self.collection_name,
-            query=query_vector,
-            query_filter=self._filter(
-                document_id=document_id,
-                embedding_model=embedding_model,
-            ),
+            prefetch=[
+                models.Prefetch(
+                    query=query_vector.dense,
+                    using="dense",
+                    filter=query_filter,
+                    limit=prefetch_limit,
+                ),
+                models.Prefetch(
+                    query=self._sparse_vector(query_vector),
+                    using="sparse",
+                    filter=query_filter,
+                    limit=prefetch_limit,
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
             limit=limit,
             with_payload=True,
             with_vectors=False,
@@ -385,9 +423,31 @@ class QdrantVectorIndex:
     @classmethod
     def _diagnostic_row(cls, record: Any) -> dict[str, Any]:
         payload = dict(record.payload or {})
-        vector = record.vector
-        if isinstance(vector, dict):
-            raise ValueError("Named vectors are not supported by this CRAG collection")
-        payload["vector"] = list(vector or [])
+        vector = record.vector or {}
+        if not isinstance(vector, dict):
+            payload["vector"] = list(vector)
+            payload["sparse_vector"] = None
+            payload["point_id"] = record.id
+            return payload
+        payload["vector"] = list(vector.get("dense") or [])
+        sparse = vector.get("sparse")
+        payload["sparse_vector"] = {
+            "indices": list(sparse.indices),
+            "values": list(sparse.values),
+        } if isinstance(sparse, models.SparseVector) else None
         payload["point_id"] = record.id
         return payload
+
+    @staticmethod
+    def _sparse_vector(vector: EmbeddingVector) -> models.SparseVector:
+        pairs = sorted(vector.lexical_weights.items())
+        if not pairs or any(
+            not isinstance(token_id, int) or token_id < 0
+            or not math.isfinite(weight) or weight <= 0
+            for token_id, weight in pairs
+        ):
+            raise ValueError("Sparse vector requires nonempty, positive lexical_weights")
+        return models.SparseVector(
+            indices=[token_id for token_id, _ in pairs],
+            values=[float(weight) for _, weight in pairs],
+        )

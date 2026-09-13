@@ -3,65 +3,61 @@ from __future__ import annotations
 import pytest
 
 from crag_ingestion.config import IngestionConfig
-from crag_ingestion.embeddings import SentenceTransformerEmbedder
+from crag_ingestion.embeddings import BGEM3Embedder
 from crag_ingestion.embeddings import factory
 
 
 class _FakeModel:
-    def __init__(self, dimensions: int = 3) -> None:
-        self.dimensions = dimensions
-        self.calls: list[tuple[list[str], bool, bool]] = []
-
-    def get_sentence_embedding_dimension(self) -> int:
-        return self.dimensions
+    def __init__(self, *, lexical_weights: list[dict[str, float]] | None = None) -> None:
+        self.calls: list[tuple[list[str], bool, bool, bool]] = []
+        self.lexical_weights = lexical_weights
 
     def encode(
-        self,
-        texts: list[str],
-        *,
-        normalize_embeddings: bool,
-        show_progress_bar: bool,
-    ) -> list[list[float]]:
-        self.calls.append((texts, normalize_embeddings, show_progress_bar))
-        return [[1, 0.5, 0] for _ in texts]
+        self, texts: list[str], *, return_dense: bool, return_sparse: bool,
+        return_colbert_vecs: bool,
+    ) -> dict[str, object]:
+        self.calls.append((texts, return_dense, return_sparse, return_colbert_vecs))
+        return {
+            "dense_vecs": [[3.0, 4.0] + [0.0] * 1022 for _ in texts],
+            "lexical_weights": self.lexical_weights or [{"42": 0.75, "7": 1.25} for _ in texts],
+        }
 
 
-def test_sentence_transformer_embedder_uses_normalized_model_vectors() -> None:
+def test_bge_m3_extracts_dense_and_lexical_weights_once() -> None:
     model = _FakeModel()
-    embedder = SentenceTransformerEmbedder("test/model", model=model)
+    embedder = BGEM3Embedder("BAAI/bge-m3", model=model)
 
-    assert embedder.name == "test/model"
-    assert embedder.dimensions == 3
-    assert embedder.embed(["xin chào", "tài liệu"]) == [
-        [1.0, 0.5, 0.0],
-        [1.0, 0.5, 0.0],
-    ]
-    assert model.calls == [(["xin chào", "tài liệu"], True, False)]
+    assert embedder.name == "BAAI/bge-m3"
+    assert embedder.dimensions == 1024
+    vectors = embedder.embed(["xin chào", "tài liệu"])
+    assert len(vectors) == 2
+    assert vectors[0].dense[:2] == [0.6, 0.8]
+    assert vectors[0].lexical_weights == {42: 0.75, 7: 1.25}
+    assert model.calls == [(["xin chào", "tài liệu"], True, True, False)]
     assert embedder.embed([]) == []
 
 
-def test_sentence_transformer_embedder_rejects_invalid_dimensions() -> None:
-    embedder = SentenceTransformerEmbedder("test/model", model=_FakeModel(0))
-    with pytest.raises(ValueError, match="invalid embedding dimension"):
-        _ = embedder.dimensions
+def test_bge_m3_rejects_bad_dense_shape() -> None:
+    class BadShape(_FakeModel):
+        def encode(self, *args: object, **kwargs: object) -> dict[str, object]:
+            return {"dense_vecs": [[1.0]], "lexical_weights": [{"1": 1.0}]}
+
+    with pytest.raises(ValueError, match="dense vector dimensions"):
+        BGEM3Embedder("BAAI/bge-m3", model=BadShape()).embed(["text"])
 
 
-def test_sentence_transformer_embedder_rejects_inconsistent_vectors() -> None:
-    model = _FakeModel(4)
-    embedder = SentenceTransformerEmbedder("test/model", model=model)
-    with pytest.raises(ValueError, match="inconsistent vector dimensions"):
-        embedder.embed(["text"])
+def test_bge_m3_rejects_invalid_lexical_weights() -> None:
+    with pytest.raises(ValueError, match="lexical_weights"):
+        BGEM3Embedder("BAAI/bge-m3", model=_FakeModel(lexical_weights=[{"-1": 1.0}])).embed(["text"])
 
 
-def test_factory_always_builds_sentence_transformer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_factory_builds_single_bge_m3_model(monkeypatch: pytest.MonkeyPatch) -> None:
     sentinel = object()
-    monkeypatch.setattr(factory, "SentenceTransformerEmbedder", lambda model_name: sentinel)
-    config = IngestionConfig(embedding_model="custom/model")
-
-    assert factory.create_embedder(config) is sentinel
+    monkeypatch.setattr(factory, "BGEM3Embedder", lambda model_name: sentinel)
+    assert factory.create_embedder(IngestionConfig()) is sentinel
 
 
 def test_default_embedding_model_and_collection() -> None:
     config = IngestionConfig()
     assert config.embedding_model == "BAAI/bge-m3"
-    assert config.qdrant_collection == "crag_bge_m3"
+    assert config.qdrant_collection == "crag_bge_m3_hybrid"

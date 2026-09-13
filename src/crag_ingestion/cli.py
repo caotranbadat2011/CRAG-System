@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_QDRANT_COLLECTION,
+    DEFAULT_RERANKER_MODEL,
     ChunkingConfig,
     IngestionConfig,
 )
@@ -21,7 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--embedding-model",
         default=DEFAULT_EMBEDDING_MODEL,
-        help="Sentence Transformers model name or local model path",
+        help="BGE-M3-compatible FlagEmbedding model name or local model path",
     )
     parser.add_argument("--max-chars", type=int, default=1_200)
     parser.add_argument("--overlap-chars", type=int, default=180)
@@ -41,6 +42,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Read the Qdrant API key from a file",
     )
     parser.add_argument("--qdrant-collection", default=DEFAULT_QDRANT_COLLECTION)
+    parser.add_argument("--reranker-model", default=DEFAULT_RERANKER_MODEL)
     parser.add_argument("--qdrant-timeout", type=int, default=30)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -52,6 +54,8 @@ def _parser() -> argparse.ArgumentParser:
     query.add_argument("text")
     query.add_argument("--limit", type=int, default=5)
     query.add_argument("--document-id")
+    query.add_argument("--rerank", action="store_true", help="Rerank hybrid candidates with BGE")
+    query.add_argument("--candidate-limit", type=int, default=30)
     subparsers.add_parser("list", help="List indexed documents")
     validate = subparsers.add_parser("validate", help="Check index and provenance invariants")
     validate.add_argument("--skip-file-checks", action="store_true")
@@ -69,6 +73,7 @@ def _config(args: argparse.Namespace) -> IngestionConfig:
         data_dir=args.data_dir,
         pdf_password=pdf_password,
         embedding_model=args.embedding_model,
+        reranker_model=args.reranker_model,
         qdrant_url=args.qdrant_url,
         qdrant_api_key=qdrant_api_key,
         qdrant_collection=args.qdrant_collection,
@@ -97,7 +102,16 @@ def main(argv: list[str] | None = None) -> int:
                 _print({"discovered": len(files), "results": results, "failures": failures})
                 return 1 if failures else 0
             if args.command == "query":
-                _print([item.to_dict() for item in pipeline.search(args.text, args.limit, args.document_id)])
+                if args.rerank:
+                    results = pipeline.retrieve_for_evaluation(
+                        args.text,
+                        candidate_limit=args.candidate_limit,
+                        evaluation_limit=args.limit,
+                        document_id=args.document_id,
+                    )
+                else:
+                    results = pipeline.search(args.text, args.limit, args.document_id)
+                _print([item.to_dict() for item in results])
                 return 0
             if args.command == "list":
                 _print(pipeline.index.documents())

@@ -36,6 +36,7 @@ def test_end_to_end_ingest_search_validate_and_skip(tmp_path: Path, fake_embedde
         assert indexed is not None
         schema = pipeline.index.collection_schema()
         assert schema["distance"] == "Cosine"
+        assert schema["hybrid_vectors"] is True
         assert schema["vector_size"] == fake_embedder.dimensions
         processed = json.loads(Path(indexed["processed_path"]).read_text(encoding="utf-8"))
         assert processed["content_hash"] == result.content_hash

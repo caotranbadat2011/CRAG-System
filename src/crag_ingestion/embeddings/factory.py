@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from ..config import IngestionConfig
 from .base import Embedder
-from .sentence_transformer import SentenceTransformerEmbedder
+from .bge_m3 import BGEM3Embedder
 
 
 def create_embedder(config: IngestionConfig) -> Embedder:
-    return SentenceTransformerEmbedder(config.embedding_model)
+    return BGEM3Embedder(config.embedding_model)

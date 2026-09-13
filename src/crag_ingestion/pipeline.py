@@ -8,11 +8,15 @@ from typing import Iterable
 from .chunking import StructuralChunker
 from .cleaning import DocumentCleaner
 from .config import IngestionConfig
-from .embeddings import Embedder, create_embedder
+from .embeddings import Embedder, EmbeddingVector, create_embedder
 from .exceptions import EmptyDocumentError, FileTooLargeError, IngestionError
 from .index import QdrantVectorIndex
 from .models import IngestionResult, SearchResult
 from .parsers import ParserRegistry, default_registry
+from .retrieval import (
+    BGEReranker, KnowledgeStrip, RerankedHit, RerankedRetriever, Reranker,
+    SemanticDiversityFilter,
+)
 from .storage import ArtifactStore
 from .utils import canonical_json, sha256_file, stable_document_id
 from .validation import ValidationReport, validate_index
@@ -20,7 +24,7 @@ from .validation import ValidationReport, validate_index
 
 class IngestionPipeline:
     # Bump whenever parsing semantics change so existing documents are rebuilt.
-    PIPELINE_VERSION = "7"
+    PIPELINE_VERSION = "8"
 
     def __init__(
         self,
@@ -29,10 +33,12 @@ class IngestionPipeline:
         registry: ParserRegistry | None = None,
         embedder: Embedder | None = None,
         index: QdrantVectorIndex | None = None,
+        reranker: Reranker | None = None,
     ) -> None:
         self.config = config or IngestionConfig()
         self.registry = registry or default_registry(self.config)
         self.embedder = embedder or create_embedder(self.config)
+        self._reranker = reranker
         self.cleaner = DocumentCleaner(self.config.cleaning)
         self.chunker = StructuralChunker(self.config.chunking)
         self.artifacts = ArtifactStore(self.config.raw_dir, self.config.processed_dir)
@@ -108,7 +114,7 @@ class IngestionPipeline:
         if not chunks:
             raise EmptyDocumentError(f"No chunks generated from: {source}")
         vectors = self._embed_batches(chunk.text for chunk in chunks)
-        if any(not any(vector) for vector in vectors):
+        if any(not any(vector.dense) or not vector.lexical_weights for vector in vectors):
             raise EmptyDocumentError(f"At least one chunk has no embeddable tokens: {source}")
 
         processed_path = self.artifacts.store_processed(
@@ -155,6 +161,7 @@ class IngestionPipeline:
         )
 
     def search(self, query: str, limit: int = 5, document_id: str | None = None) -> list[SearchResult]:
+        """Return raw Qdrant hybrid/RRF hits; use retrieve_for_evaluation for reranked hits."""
         if not query.strip():
             return []
         vector = self.embedder.embed([query])[0]
@@ -165,11 +172,46 @@ class IngestionPipeline:
             embedding_model=self.embedder.name,
         )
 
+    def retrieve_for_evaluation(
+        self,
+        query: str,
+        *,
+        candidate_limit: int = 30,
+        evaluation_limit: int = 10,
+        document_id: str | None = None,
+    ) -> list[RerankedHit]:
+        """Give the future CRAG evaluator cross-encoder-ranked candidate chunks."""
+        if self._reranker is None:
+            self._reranker = BGEReranker(self.config.reranker_model)
+        return RerankedRetriever(self.search, self._reranker).retrieve(
+            query,
+            candidate_limit=candidate_limit,
+            evaluation_limit=evaluation_limit,
+            document_id=document_id,
+        )
+
+    def select_diverse_context(
+        self,
+        query: str,
+        strips: list[KnowledgeStrip],
+        *,
+        limit: int,
+        min_per_source: dict[str, int] | None = None,
+        relevance_weight: float = 0.7,
+        duplicate_threshold: float = 0.95,
+    ) -> list[KnowledgeStrip]:
+        """Select nonredundant refined strips after Correct/Incorrect/Ambiguous routing."""
+        return SemanticDiversityFilter(
+            self.embedder,
+            relevance_weight=relevance_weight,
+            duplicate_threshold=duplicate_threshold,
+        ).select(query, strips, limit=limit, min_per_source=min_per_source)
+
     def validate(self, check_files: bool = True) -> ValidationReport:
         return validate_index(self.index, check_files=check_files)
 
-    def _embed_batches(self, texts: Iterable[str], batch_size: int = 32) -> list[list[float]]:
-        result: list[list[float]] = []
+    def _embed_batches(self, texts: Iterable[str], batch_size: int = 32) -> list[EmbeddingVector]:
+        result: list[EmbeddingVector] = []
         batch: list[str] = []
         for text in texts:
             batch.append(text)

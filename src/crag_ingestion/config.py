@@ -5,7 +5,8 @@ from pathlib import Path
 
 
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
-DEFAULT_QDRANT_COLLECTION = "crag_bge_m3"
+DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
+DEFAULT_QDRANT_COLLECTION = "crag_bge_m3_hybrid"
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,7 @@ class IngestionConfig:
     pdf_password: str | None = field(default=None, repr=False)
     max_docx_uncompressed_bytes: int = 200 * 1024 * 1024
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    reranker_model: str = DEFAULT_RERANKER_MODEL
     qdrant_url: str | None = None
     qdrant_api_key: str | None = field(default=None, repr=False)
     qdrant_collection: str = DEFAULT_QDRANT_COLLECTION
