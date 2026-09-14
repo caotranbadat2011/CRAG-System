@@ -6,7 +6,7 @@ import pytest
 
 from crag_ingestion.config import AnswerConfig
 from crag_ingestion.retrieval.answer import (
-    GeminiAnswerGenerator, NO_ANSWER, PARTIAL_NOTICE,
+    GeminiAnswerGenerator, MODEL_ABSTAINED, NO_ANSWER, PARTIAL_NOTICE,
 )
 from crag_ingestion.retrieval.context import AssembledContext, Citation
 from crag_ingestion.retrieval.diversity import KnowledgeStrip
@@ -46,6 +46,7 @@ def test_answer_uses_existing_citation_and_default_model() -> None:
     assert result.status == "answered"
     assert result.model == "gemini-3.5-flash-lite"
     assert result.text == "Tokyo là thủ đô Nhật Bản. [1]"
+    assert result.attempts == 1 and result.retry_reason is None
     assert [citation.source_ref for citation in result.citations] == ["https://example.org"]
 
 
@@ -86,10 +87,76 @@ def test_answer_rejects_invalid_citation(claims: list[dict[str, object]]) -> Non
 
 
 def test_answer_can_abstain_with_available_but_irrelevant_evidence() -> None:
+    calls = 0
+
+    def transport(_payload: dict[str, object], _key: str) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return _response(False, [])
+
     generator = GeminiAnswerGenerator(
-        api_key="test-key", transport=lambda _payload, _key: _response(False, [])
+        api_key="test-key", transport=transport
     )
     answer = generator.generate("Thủ đô Nhật Bản?", _context())
+    assert calls == 2
+    assert answer.status == "model_abstained" and answer.text == MODEL_ABSTAINED
+    assert answer.attempts == 2 and answer.retry_reason == "abstained_with_ready_context"
+    assert answer.citations == ()
+
+
+def test_answer_recovers_from_false_abstention_using_same_evidence() -> None:
+    texts = (
+        "Abstract nêu xung đột giữa trí nhớ tham số và bằng chứng truy xuất.",
+        "TrustMargin phân định hai nguồn bằng điểm dựa trên likelihood.",
+    )
+    strips = tuple(
+        KnowledgeStrip(f"s{index}", value, "internal", "chunk-abstract", {})
+        for index, value in enumerate(texts, 1)
+    )
+    citations = tuple(
+        Citation(f"[{index}]", strip.strip_id, "internal", strip.source_ref, {})
+        for index, strip in enumerate(strips, 1)
+    )
+    context = AssembledContext("ready", "\n".join(
+        json.dumps({"citation": citation.marker, "text": strip.text}, ensure_ascii=False)
+        for strip, citation in zip(strips, citations, strict=True)
+    ), strips, citations, ())
+    payloads: list[dict[str, object]] = []
+
+    def transport(payload: dict[str, object], _key: str) -> dict[str, object]:
+        payloads.append(json.loads(json.dumps(payload)))
+        if len(payloads) == 1:
+            return _response(False, [])
+        return _response(True, [
+            {"text": "Abstract nêu xung đột giữa trí nhớ tham số và bằng chứng truy xuất.", "citations": ["[1]"]},
+            {"text": "TrustMargin dùng điểm likelihood để phân định nguồn.", "citations": ["[2]"]},
+        ])
+
+    answer = GeminiAnswerGenerator(api_key="test-key", transport=transport).generate(
+        "Phần Abstract mô tả điều gì?", context
+    )
+    assert answer.status == "answered"
+    assert answer.attempts == 2 and answer.retry_reason == "abstained_with_ready_context"
+    assert "[1]\n" in answer.text and answer.text.endswith("[2]")
+    assert len(answer.citations) == 2
+    first_evidence = payloads[0]["contents"][0]["parts"][0]["text"]  # type: ignore[index]
+    second_evidence = payloads[1]["contents"][0]["parts"][0]["text"]  # type: ignore[index]
+    assert first_evidence == second_evidence
+    assert "Reconsider" in payloads[1]["systemInstruction"]["parts"][0]["text"]  # type: ignore[index]
+
+
+def test_partial_context_does_not_force_retry_on_abstention() -> None:
+    calls = 0
+
+    def transport(_payload: dict[str, object], _key: str) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return _response(False, [])
+
+    answer = GeminiAnswerGenerator(api_key="test-key", transport=transport).generate(
+        "Thủ đô Nhật Bản?", _context("partial")
+    )
+    assert calls == 1
     assert answer.status == "insufficient_evidence" and answer.text == NO_ANSWER
 
 
@@ -140,6 +207,7 @@ def test_answer_retries_corrupted_diacritics_once() -> None:
     )
     assert len(calls) == 2
     assert answer.text == "Tokyo mô tả thủ đô. [1]"
+    assert answer.retry_reason == "corrupted_unicode"
 
 
 def test_answer_rejects_persistently_corrupted_unicode() -> None:

@@ -52,7 +52,11 @@ class LocalWebService:
     @staticmethod
     def summarize(result: CragRunResult) -> dict[str, object]:
         strips = {strip.strip_id: strip for strip in result.context.strips}
-        used = result.answer.citations if result.answer else result.context.citations
+        used = (
+            result.context.citations
+            if result.answer and result.answer.status == "model_abstained"
+            else result.answer.citations if result.answer else result.context.citations
+        )
         citations = []
         for citation in used:
             metadata = citation.metadata
@@ -94,7 +98,11 @@ class LocalWebService:
             raise ValueError("Invalid citation reference")
         result = CragWorkflow.load_run(self.pipeline.config.checkpoint_path, run_id)
         marker = f"[{number}]"
-        citations = result.answer.citations if result.answer else result.context.citations
+        citations = (
+            result.context.citations
+            if result.answer and result.answer.status == "model_abstained"
+            else result.answer.citations if result.answer else result.context.citations
+        )
         citation = next((item for item in citations if item.marker == marker), None)
         if citation is None or citation.source_type != "internal":
             raise KeyError("Internal citation was not found")

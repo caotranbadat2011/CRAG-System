@@ -268,6 +268,8 @@ class CragWorkflow:
                         item["marker"], item["strip_id"], item["source_type"],
                         item["source_ref"], item["metadata"],
                     ) for item in state["answer"]["citations"]),
+                    state["answer"].get("attempts", 0),
+                    state["answer"].get("retry_reason"),
                 ) if "answer" in state else None
             ),
             warnings=tuple(state["warnings"]),

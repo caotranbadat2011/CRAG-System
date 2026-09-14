@@ -225,7 +225,15 @@ marker against the selected context and attaches the matching source metadata
 in `answer.citations`. Invalid or missing markers fail explicitly. For
 `partial` context, the answer starts with an evidence-limitation notice. For
 `no_evidence`, no generation API call is made and the answer abstains. Gemini
-may also abstain when available evidence does not answer the question. Citation
+may also abstain when available evidence does not answer the question. If it
+abstains despite `ready` context, the answer node retries once with the same
+selected evidence and an explicit citation-by-citation grounding instruction.
+The retry never forces unsupported claims. If Gemini still returns no claims,
+the result is `model_abstained`, not `insufficient_evidence`; the UI shows the
+answer state separately from the retrieval branch and context state. Safe
+diagnostics (`answer.attempts` and `answer.retry_reason`) are stored without
+recording raw Gemini responses, source text, or API keys. This retry can use
+one additional generation request. Citation
 validation checks references, not whether each claim is actually supported;
 important claims still need independent factual review.
 The answer defaults to at most 12 claims and 4,096 Gemini output tokens;

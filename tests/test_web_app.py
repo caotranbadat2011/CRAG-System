@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+from dataclasses import replace
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -91,6 +92,18 @@ def test_local_api_and_document_lifecycle(
                 )
                 status, old = _request(base, "/api/runs/" + "a" * 32)
                 assert status == 200 and old["run_id"] == "a" * 32
+
+                abstained = replace(run, answer=GeneratedAnswer(
+                    "model_abstained", "Mô hình chưa tạo được đáp án.", "test", (),
+                    2, "abstained_with_ready_context",
+                ))
+                summary = service.summarize(abstained)
+                assert summary["answer"]["attempts"] == 2  # type: ignore[index]
+                assert summary["citations"][0]["text"] == "Content here."  # type: ignore[index]
+                monkeypatch.setattr("crag_ingestion.web.CragWorkflow.load_run", lambda *_args: abstained)
+                with urlopen(base + f"/api/runs/{'a' * 32}/citations/1/source", timeout=10) as response:
+                    assert response.read() == b"# Heading\nContent here."
+                monkeypatch.setattr("crag_ingestion.web.CragWorkflow.load_run", lambda *_args: run)
 
                 status, updated = _request(base, f"/api/documents/{doc_id}", "PUT", {
                     "filename": "new.md", "content_base64": base64.b64encode(b"# Changed\nNew evidence.").decode(),

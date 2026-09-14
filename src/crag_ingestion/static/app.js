@@ -55,12 +55,33 @@ function renderAnswer(answer) {
 
 function renderRun(result) {
   byId("result-panel").hidden = false;
-  byId("result-badges").replaceChildren(badge(result.branch), badge(result.status));
+  const answerStates = {
+    answered: "Đã trả lời",
+    partial: "Trả lời một phần",
+    insufficient_evidence: "Thiếu bằng chứng",
+    model_abstained: "Model chưa trả lời",
+  };
+  const answerBadge = result.answer
+    ? badge(answerStates[result.answer.status] || result.answer.status)
+    : badge("Chưa có đáp án");
+  answerBadge.classList.add(result.answer?.status || "no_evidence");
+  if (result.answer?.status === "model_abstained") {
+    answerBadge.style.backgroundColor = "#fde7e2";
+    answerBadge.style.color = "#a13b2e";
+  }
+  const contextBadge = text("span", `Context: ${result.status}`, `badge ${result.status}`);
+  byId("result-badges").replaceChildren(badge(result.branch), contextBadge, answerBadge);
   renderAnswer(result.answer);
   byId("run-id").textContent = `Run ID: ${result.run_id}`;
   const warningBox = byId("warnings");
-  warningBox.hidden = !result.warnings.length;
-  warningBox.textContent = result.warnings.join(" · ");
+  const warnings = [...result.warnings];
+  if (result.answer?.status === "model_abstained") {
+    warnings.push(`Gemini chưa tạo được claim có trích dẫn sau ${result.answer.attempts || 1} lần thử; context đã có bằng chứng được chọn.`);
+  }
+  warningBox.hidden = !warnings.length;
+  warningBox.textContent = warnings.join(" · ");
+  byId("citations-title").textContent = result.answer?.status === "model_abstained"
+    ? "Bằng chứng đã chọn (chưa được dùng trong đáp án)" : "Nguồn trích dẫn";
   const list = byId("citations");
   list.replaceChildren();
   if (!result.citations.length) list.append(text("p", "Không có nguồn trích dẫn.", "muted"));
