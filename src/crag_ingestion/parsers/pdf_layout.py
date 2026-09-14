@@ -24,6 +24,24 @@ def extract_page_layout(
         blocks, metadata = _extract_with_pdfplumber(
             plumber_page, page_number, source_path, width, height
         )
+        # Some PDFs encode inter-word spacing through text positioning instead
+        # of space glyphs. pdfplumber can then fuse whole phrases into tokens
+        # even though pypdf's decoded text preserves the spaces.
+        if not metadata["table_count"]:
+            plain = page.extract_text() or ""
+            extracted = " ".join(block.text for block in blocks)
+            if (
+                len(plain.split()) >= 80
+                and len(plain.split()) >= 1.5 * max(1, len(extracted.split()))
+                and len(extracted) >= 0.65 * len(plain)
+            ):
+                fallback = _extract_pypdf_text_blocks(
+                    plain, page_number, source_path, width, height
+                )
+                if fallback:
+                    metadata["backend"] = "pypdf_text_fallback"
+                    metadata["position_precision"] = "page"
+                    return fallback, metadata
         metadata["backend"] = "pdfplumber"
         return blocks, metadata
     blocks, metadata = _extract_with_pypdf(page, page_number, source_path, width, height)
@@ -38,13 +56,11 @@ def classify_document_structure(blocks: list[TextBlock]) -> None:
         if block.kind in {"paragraph", "list_item", "formula"}
         and isinstance(block.metadata.get("font_size"), (int, float))
     ]
-    if not text_blocks:
-        return
     weighted_sizes: list[float] = []
     for block in text_blocks:
         size = float(block.metadata["font_size"])
         weighted_sizes.extend([size] * max(1, min(20, len(block.text.split()))))
-    body_size = statistics.median(weighted_sizes)
+    body_size = statistics.median(weighted_sizes) if weighted_sizes else 0.0
     candidates: list[TextBlock] = []
     for block in text_blocks:
         size = float(block.metadata["font_size"])
@@ -73,7 +89,71 @@ def classify_document_structure(blocks: list[TextBlock]) -> None:
             headings.append(block.text)
             block.kind = "heading"
             block.metadata["heading_level"] = level
+        elif block.kind == "heading":
+            level = int(block.metadata.get("heading_level", 1))
+            headings[:] = headings[: level - 1]
+            headings.append(block.text)
         block.heading_path = tuple(headings)
+
+
+_SECTION_HEADING = re.compile(r"^(\d+(?:\.\d+)*\.?)\s+([A-Z][^.!?]{2,100})$")
+
+
+def _extract_pypdf_text_blocks(
+    content: str, page_number: int, source_path: Path, width: float, height: float
+) -> list[TextBlock]:
+    """Recover readable text when glyph positioning defeats word grouping.
+
+    This fallback deliberately advertises page-level provenance: pypdf's
+    decoded reading order has no trustworthy word coordinates.
+    """
+    blocks: list[TextBlock] = []
+    current = ""
+    source = _source(source_path, page_number, (0.0, 0.0, width, height))
+
+    def emit(value: str, kind: str = "paragraph", level: int = 1) -> None:
+        if value:
+            metadata: dict[str, object] = {
+                "source": dict(source),
+                "detection_method": "pypdf_text_fallback",
+                "position_precision": "page",
+            }
+            if kind == "heading":
+                metadata["heading_level"] = level
+            blocks.append(TextBlock(value, kind, page_number, metadata=metadata))
+
+    def flush() -> None:
+        nonlocal current
+        emit(current)
+        current = ""
+
+    for raw in content.splitlines():
+        line = " ".join(raw.split())
+        if not line:
+            flush()
+            continue
+        numbered = _SECTION_HEADING.fullmatch(line)
+        if numbered or line in {"Abstract", "References", "Conclusion", "Introduction"}:
+            flush()
+            level = (min(6, numbered.group(1).rstrip(".").count(".") + 1)
+                     if numbered else 1)
+            emit(line, "heading", max(1, level))
+            continue
+        if _LIST_ITEM.match(line):
+            flush()
+            kind, extra = _classify_text_line(line, 0.0, width)
+            emit(line, kind)
+            if extra:
+                blocks[-1].metadata.update(extra)
+            continue
+        if current.endswith("-") and line[0].islower():
+            current = current[:-1] + line
+        else:
+            current = f"{current} {line}".strip()
+        if len(current) >= 600 and current.endswith((".", "?", "!")):
+            flush()
+    flush()
+    return blocks
 
 
 def _extract_with_pdfplumber(

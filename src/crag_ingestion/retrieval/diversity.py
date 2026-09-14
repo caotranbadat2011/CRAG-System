@@ -21,6 +21,15 @@ class KnowledgeStrip:
         if not all((self.strip_id.strip(), self.text.strip(), self.source_type.strip(), self.source_ref.strip())):
             raise ValueError("Knowledge strips require an ID, text, source type, and citation reference")
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "strip_id": self.strip_id,
+            "text": self.text,
+            "source_type": self.source_type,
+            "source_ref": self.source_ref,
+            "metadata": self.metadata,
+        }
+
 
 class SemanticDiversityFilter:
     """Select relevant but nonredundant knowledge strips with dense-vector MMR."""

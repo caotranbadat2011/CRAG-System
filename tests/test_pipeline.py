@@ -7,7 +7,7 @@ import pytest
 
 from crag_ingestion.config import ChunkingConfig, IngestionConfig
 from crag_ingestion.embeddings.base import Embedder
-from crag_ingestion.exceptions import EmptyDocumentError, FileTooLargeError, UnsupportedFormatError
+from crag_ingestion.exceptions import EmptyDocumentError, FileTooLargeError, StaleIndexError, UnsupportedFormatError
 from crag_ingestion.pipeline import IngestionPipeline
 
 
@@ -69,6 +69,45 @@ def test_changed_document_replaces_old_chunks(tmp_path: Path, fake_embedder: Emb
         assert second.chunk_count == 1
         texts = [row["text"] for row in pipeline.index.document_chunks(first.document_id)]
         assert texts == ["beta mới"]
+
+
+def test_retrieval_fails_closed_after_parser_version_change_until_reindexed(
+    tmp_path: Path, fake_embedder: Embedder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("# Introduction\n\nOriginal answer with complete evidence.", encoding="utf-8")
+    with IngestionPipeline(_config(tmp_path), embedder=fake_embedder) as pipeline:
+        document_id = pipeline.ingest_file(source).document_id
+        monkeypatch.setattr(pipeline, "PIPELINE_VERSION", "new-parser-version")
+        record = pipeline.index.get_document(document_id)
+        assert record is not None
+        assert pipeline.document_index_status(record) == "outdated_pipeline"
+        with pytest.raises(StaleIndexError, match="Làm mới"):
+            pipeline.search("answer", document_id=document_id)
+        with pytest.raises(StaleIndexError, match="Làm mới"):
+            pipeline.search("answer")
+        with pytest.raises(StaleIndexError, match="Làm mới"):
+            pipeline.run_crag("answer", document_id=document_id)
+        pipeline.ingest_file(source)
+        assert pipeline.document_index_status(pipeline.index.get_document(document_id)) == "current"  # type: ignore[arg-type]
+        assert pipeline.search("answer", document_id=document_id)
+
+
+def test_retrieval_detects_changed_or_missing_source(
+    tmp_path: Path, fake_embedder: Embedder
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("A source passage.", encoding="utf-8")
+    with IngestionPipeline(_config(tmp_path), embedder=fake_embedder) as pipeline:
+        document_id = pipeline.ingest_file(source).document_id
+        source.write_text("A different passage.", encoding="utf-8")
+        with pytest.raises(StaleIndexError, match="source_changed"):
+            pipeline.search("passage", document_id=document_id)
+        pipeline.ingest_file(source)
+        assert pipeline.search("different", document_id=document_id)
+        source.unlink()
+        with pytest.raises(StaleIndexError, match="source_missing"):
+            pipeline.search("different", document_id=document_id)
 
 
 def test_file_size_empty_and_unsupported_guards(tmp_path: Path, fake_embedder: Embedder) -> None:

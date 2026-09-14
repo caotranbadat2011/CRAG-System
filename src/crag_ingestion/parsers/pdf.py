@@ -34,7 +34,7 @@ class PdfParser(DocumentParser):
     @property
     def signature(self) -> str:
         backend = "pdfplumber" if importlib.util.find_spec("pdfplumber") else "pypdf"
-        return f"pdf-v3|backend={backend}|images={int(self.extract_images)}"
+        return f"pdf-v4|backend={backend}|images={int(self.extract_images)}"
 
     def parse(self, path: Path, *, source_path: Path | None = None) -> ParsedDocument:
         try:
@@ -145,6 +145,14 @@ class PdfParser(DocumentParser):
                 page_metadata.append(layout)
 
             classify_document_structure(blocks)
+            fallback_pages = [index for index, layout in enumerate(page_metadata, 1)
+                              if layout.get("backend") == "pypdf_text_fallback"]
+            if fallback_pages:
+                warnings.append(
+                    "Recovered missing word spacing with pypdf text on pages "
+                    + ", ".join(map(str, fallback_pages))
+                    + "; text locations on these pages are page-level only"
+                )
             for ordinal, block in enumerate(blocks):
                 block.ordinal = ordinal
             metadata: dict[str, object] = {
@@ -157,7 +165,9 @@ class PdfParser(DocumentParser):
                     "page_count": len(reader.pages),
                     "encrypted": encrypted,
                     "source_path": str(logical_source),
-                    "layout_backend": "pdfplumber" if plumber_pdf is not None else "pypdf",
+                    "layout_backend": ("mixed" if fallback_pages else
+                                       "pdfplumber" if plumber_pdf is not None else "pypdf"),
+                    "text_fallback_pages": fallback_pages,
                     "pages": page_metadata,
                     "image_count": image_count,
                 }

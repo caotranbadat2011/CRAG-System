@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CRAG · Hỏi đáp có nguồn</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="brand"><span class="brand-mark">C</span><div><strong>CRAG System</strong><small>Hỏi đáp có kiểm chứng nguồn</small></div></div>
+    <span class="local-badge">Chạy cục bộ · Gemini + Qdrant</span>
+  </header>
+  <main>
+    <section class="panel hero">
+      <div class="eyebrow">CORRECTIVE RETRIEVAL-AUGMENTED GENERATION</div>
+      <h1>Đặt câu hỏi. Kiểm tra từng nguồn.</h1>
+      <p>Câu trả lời được tạo từ các đoạn bằng chứng đã chọn. Nhấn vào ký hiệu trích dẫn để xem đoạn nguồn và vị trí trong tài liệu.</p>
+      <form id="ask-form">
+        <label for="question">Câu hỏi</label>
+        <textarea id="question" rows="3" maxlength="5000" placeholder="Ví dụ: Tài liệu giới thiệu bài toán gì?" required></textarea>
+        <div class="form-row">
+          <label class="field">Phạm vi tài liệu<select id="scope"><option value="">Toàn bộ tài liệu</option></select></label>
+          <label class="field small">Ứng viên<input id="candidate-limit" type="number" min="1" max="100" value="10"></label>
+          <label class="field small">Đánh giá<input id="limit" type="number" min="1" max="100" value="3"></label>
+          <button type="submit" class="primary">Hỏi CRAG</button>
+        </div>
+      </form>
+      <div id="ask-status" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section id="result-panel" class="panel result" hidden>
+      <div class="section-heading"><div><div class="eyebrow">KẾT QUẢ</div><h2>Câu trả lời</h2></div><div id="result-badges" class="badges"></div></div>
+      <div id="answer-text" class="answer-text"></div>
+      <div id="run-id" class="run-id"></div>
+      <div id="warnings" class="warnings" hidden></div>
+      <h3>Nguồn trích dẫn</h3>
+      <div id="citations" class="citations"></div>
+    </section>
+
+    <section class="panel documents">
+      <div class="section-heading"><div><div class="eyebrow">KHO TRI THỨC</div><h2>Quản lý tài liệu</h2></div><button id="refresh-list" class="secondary" type="button">Tải lại danh sách</button></div>
+      <p class="muted">Upload tạo bản nguồn do ứng dụng quản lý. Làm mới sẽ đọc lại file nguồn hiện có; xóa tài liệu khỏi Qdrant và xóa bản lưu do CRAG quản lý, nhưng không xóa file gốc bên ngoài.</p>
+      <form id="upload-form" class="upload-row">
+        <label for="upload-file">Thêm PDF, DOCX, Markdown hoặc TXT</label>
+        <input id="upload-file" type="file" accept=".pdf,.docx,.md,.markdown,.txt" required>
+        <button type="submit" class="secondary">Thêm &amp; index</button>
+      </form>
+      <div id="document-status" class="status" role="status" aria-live="polite"></div>
+      <div id="document-list" class="document-list"></div>
+    </section>
+
+    <section class="panel history">
+      <h2>Mở lại lượt chạy</h2>
+      <form id="run-form" class="run-row"><label for="run-input">Run ID</label><input id="run-input" placeholder="32 ký tự hex" pattern="[0-9a-f]{32}" required><button type="submit" class="secondary">Mở kết quả</button></form>
+    </section>
+  </main>
+  <footer>CRAG chỉ xác nhận marker trích dẫn tồn tại; hãy đối chiếu nội dung nguồn trước khi sử dụng thông tin quan trọng.</footer>
+</body>
+</html>

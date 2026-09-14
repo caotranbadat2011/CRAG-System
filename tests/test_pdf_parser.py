@@ -186,6 +186,37 @@ def test_pdfplumber_table_detection_keeps_structured_rows(tmp_path: Path) -> Non
     assert any(block.text == "Outside" for block in blocks)
 
 
+def test_pdf_recovers_spacing_when_layout_tokens_are_fused(tmp_path: Path) -> None:
+    class Page:
+        mediabox = type("Box", (), {"width": 612, "height": 792})()
+
+        @staticmethod
+        def extract_text() -> str:
+            return ("1. Introduction\n" + " ".join(["Retrieval can introduce distractors"] * 35))
+
+    class Plumber:
+        @staticmethod
+        def find_tables() -> list[object]:
+            return []
+
+        @staticmethod
+        def extract_words(**_: object) -> list[dict[str, object]]:
+            return [{"text": "Retrievalcanintroducedistractors" * 35,
+                     "x0": 10, "x1": 100, "top": 20, "bottom": 32,
+                     "fontname": "Helvetica", "size": 10}]
+
+    from crag_ingestion.parsers.pdf_layout import classify_document_structure
+
+    blocks, layout = extract_page_layout(Page(), Plumber(), 1, tmp_path / "source.pdf")
+    classify_document_structure(blocks)
+    assert layout["backend"] == "pypdf_text_fallback"
+    assert blocks[0].kind == "heading"
+    assert blocks[1].heading_path == ("1. Introduction",)
+    assert "Retrieval can introduce distractors" in blocks[1].text
+    assert blocks[1].metadata["source"]["page"] == 1
+    assert blocks[1].metadata["position_precision"] == "page"
+
+
 def test_pdf_pipeline_persists_and_validates_image_provenance(
     tmp_path: Path, fake_embedder: Embedder
 ) -> None:

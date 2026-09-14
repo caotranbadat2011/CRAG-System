@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+import re
 from pathlib import Path
 
 from .models import Chunk, ParsedDocument
@@ -66,3 +67,18 @@ class ArtifactStore:
         finally:
             temporary.unlink(missing_ok=True)
         return destination
+
+    def delete_document(self, document_id: str) -> None:
+        """Remove managed raw and processed artifacts, never the user's source file."""
+        if not re.fullmatch(r"[0-9a-f]{24}", document_id):
+            raise ValueError("Invalid document ID for artifact deletion")
+        for root in (self.raw_dir, self.processed_dir):
+            target = root / document_id
+            if target.is_symlink():
+                raise ValueError("Refusing to delete a symlinked artifact directory")
+            if target.is_dir():
+                resolved_root = root.resolve()
+                resolved_target = target.resolve()
+                if resolved_target.parent != resolved_root:
+                    raise ValueError("Artifact directory is outside its managed root")
+                shutil.rmtree(resolved_target)

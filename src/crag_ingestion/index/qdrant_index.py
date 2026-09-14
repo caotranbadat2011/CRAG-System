@@ -83,7 +83,10 @@ class QdrantVectorIndex:
             sparse_vectors_config={"sparse": models.SparseVectorParams()},
         )
         if self.url:
-            for field_name in ("record_type", "document_id", "source_path", "embedding_model"):
+            for field_name in (
+                "record_type", "document_id", "source_path", "embedding_model",
+                "pipeline_signature",
+            ):
                 self.client.create_payload_index(
                     collection_name=self.collection_name,
                     field_name=field_name,
@@ -229,6 +232,7 @@ class QdrantVectorIndex:
         limit: int = 5,
         document_id: str | None = None,
         embedding_model: str | None = None,
+        pipeline_signature: str | None = None,
     ) -> list[SearchResult]:
         if (limit <= 0 or not any(query_vector.dense) or not query_vector.lexical_weights
                 or not self.collection_exists()):
@@ -242,7 +246,8 @@ class QdrantVectorIndex:
                 f"expects {schema['vector_size']}"
             )
         query_filter = self._filter(
-            document_id=document_id, embedding_model=embedding_model
+            document_id=document_id, embedding_model=embedding_model,
+            pipeline_signature=pipeline_signature,
         )
         prefetch_limit = max(limit * 4, 20)
         response = self.client.query_points(
@@ -316,6 +321,21 @@ class QdrantVectorIndex:
             ).count
         )
 
+    def delete_document(self, document_id: str) -> int:
+        """Remove only chunk points belonging to one existing document."""
+        if not document_id or not self.collection_exists():
+            return 0
+        count = self.count_document_chunks(document_id)
+        if count:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.FilterSelector(
+                    filter=self._filter(document_id=document_id)
+                ),
+                wait=True,
+            )
+        return count
+
     def diagnostic_rows(self) -> Iterable[dict[str, Any]]:
         if not self.collection_exists():
             return []
@@ -368,6 +388,7 @@ class QdrantVectorIndex:
         document_id: str | None = None,
         source_path: str | None = None,
         embedding_model: str | None = None,
+        pipeline_signature: str | None = None,
     ) -> models.Filter:
         conditions: list[models.FieldCondition] = [
             models.FieldCondition(
@@ -378,6 +399,7 @@ class QdrantVectorIndex:
             ("document_id", document_id),
             ("source_path", source_path),
             ("embedding_model", embedding_model),
+            ("pipeline_signature", pipeline_signature),
         ):
             if value is not None:
                 conditions.append(

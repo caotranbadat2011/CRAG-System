@@ -17,3 +17,6 @@ class EmptyDocumentError(IngestionError):
 class FileTooLargeError(IngestionError):
     """Raised when an input exceeds the configured size limit."""
 
+
+class StaleIndexError(IngestionError):
+    """Raised when retrieved chunks no longer match their source or pipeline."""

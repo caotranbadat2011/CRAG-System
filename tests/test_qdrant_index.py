@@ -86,6 +86,14 @@ def test_qdrant_upsert_filter_and_document_replacement(tmp_path: Path) -> None:
         )
         assert len(filtered) == 1
         assert filtered[0].chunk.document_id == "doc-2"
+        assert index.search(
+            EmbeddingVector([0.0, 1.0, 0.0], {22: 1.0}),
+            document_id="doc-2", pipeline_signature="outdated-signature",
+        ) == []
+        assert len(index.search(
+            EmbeddingVector([0.0, 1.0, 0.0], {22: 1.0}),
+            document_id="doc-2", pipeline_signature="pipeline-signature",
+        )) == 1
 
         replacement = _chunk("3" * 32, "doc-1", 0, "alpha updated")
         _replace(
@@ -101,6 +109,10 @@ def test_qdrant_upsert_filter_and_document_replacement(tmp_path: Path) -> None:
         assert index.collection_schema()["points_count"] == 2
         row = index.document_chunks("doc-1")[0]
         assert row["sparse_vector"] == {"indices": [11], "values": [0.9]}
+        assert index.delete_document("doc-1") == 1
+        assert index.get_document("doc-1") is None
+        assert index.get_document("doc-2") is not None
+        assert index.delete_document("doc-1") == 0
 
 
 def test_qdrant_rejects_an_incompatible_embedding_dimension(tmp_path: Path) -> None:
