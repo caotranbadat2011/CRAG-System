@@ -30,6 +30,51 @@ def _response(answerable: bool, claims: list[dict[str, object]]) -> dict[str, ob
     }]}}]}
 
 
+def _negative_context() -> AssembledContext:
+    strip = KnowledgeStrip(
+        "s1",
+        "31 . 0% câu có ngữ cảnh không\n\nnhét vừa một cửa sổ 256 token, "
+        "và 32 . 4% câu là câu bẫy.",
+        "internal", "chunk-1", {},
+    )
+    citation = Citation("[1]", "s1", "internal", "chunk-1", {})
+    line = json.dumps({"citation": "[1]", "text": strip.text}, ensure_ascii=False)
+    return AssembledContext("ready", line, (strip,), (citation,), ())
+
+
+def test_answer_retries_when_claim_reverses_cited_negation() -> None:
+    calls = 0
+
+    def transport(_payload: dict[str, object], _key: str) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        claim = (
+            "Dữ liệu nhét vừa một cửa sổ 256 token."
+            if calls == 1 else
+            "31,0% câu có ngữ cảnh không nhét vừa một cửa sổ 256 token."
+        )
+        return _response(True, [{"text": claim, "citations": ["[1]"]}])
+
+    answer = GeminiAnswerGenerator(api_key="test-key", transport=transport).generate(
+        "Dữ liệu có đặc điểm gì?", _negative_context()
+    )
+    assert calls == 2
+    assert answer.retry_reason == "citation_polarity_conflict"
+    assert "không nhét vừa" in answer.text
+
+
+def test_answer_omits_polarity_conflict_if_retry_still_wrong() -> None:
+    generator = GeminiAnswerGenerator(
+        api_key="test-key",
+        transport=lambda *_: _response(True, [{
+            "text": "Dữ liệu nhét vừa một cửa sổ 256 token.", "citations": ["[1]"],
+        }]),
+    )
+    answer = generator.generate("Dữ liệu có đặc điểm gì?", _negative_context())
+    assert answer.status == "model_abstained"
+    assert answer.retry_reason == "citation_polarity_conflict"
+
+
 def test_answer_uses_existing_citation_and_default_model() -> None:
     def transport(payload: dict[str, object], key: str) -> dict[str, object]:
         assert key == "test-key"

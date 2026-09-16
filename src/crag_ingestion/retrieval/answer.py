@@ -100,6 +100,8 @@ class GeminiAnswerGenerator:
                 "check whether any snippet supports at least one useful claim. "
                 "Each claim must have one or more exact citation markers from the evidence "
                 "that directly support it. Do not include citation markers in claim text. "
+                "Treat negation, percentages, and quantities as essential facts: never reverse "
+                "'not'/'không', and do not infer missing words from a truncated snippet. "
                 "If the evidence does not answer the question, set answerable=false and return "
                 "no claims. Proofread Vietnamese diacritics and emit valid Unicode; "
                 f"never output corrupted accents. Never invent citations. At most {self.config.max_claims} claims."
@@ -133,12 +135,26 @@ class GeminiAnswerGenerator:
             payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
         response = self._transport(payload, key) if self._transport else self._post(payload, key)
         claims = self._parse_response(response, markers)
+        evidence = {
+            citation.marker: strip.text
+            for citation in context.citations
+            for strip in context.strips
+            if strip.strip_id == citation.strip_id
+        }
         retry_reason: str | None = None
         if any(_corrupted_text(claim) for claim, _ in claims):
             retry_reason = "corrupted_unicode"
             retry_instruction = (
                 "Your previous answer contained corrupted Unicode accents. Regenerate "
                 "all claims with correct Vietnamese spelling and exactly supported citations."
+            )
+        elif any(_reverses_negation(claim, refs, evidence) for claim, refs in claims):
+            retry_reason = "citation_polarity_conflict"
+            retry_instruction = (
+                "At least one claim reverses a negation in its cited evidence. "
+                "Re-check EACH claim against its cited snippet, especially words such as "
+                "'không'/'not' near percentages and quantities. Correct or omit unsupported "
+                "claims; do not restate the opposite of the source."
             )
         elif not claims and context.status == "ready":
             retry_reason = "abstained_with_ready_context"
@@ -157,6 +173,10 @@ class GeminiAnswerGenerator:
             claims = self._parse_response(response, markers)
             if any(_corrupted_text(claim) for claim, _ in claims):
                 raise ValueError("Gemini answer still contains corrupted Unicode after retry")
+        claims = [
+            (claim, refs) for claim, refs in claims
+            if not _reverses_negation(claim, refs, evidence)
+        ]
         attempts = 2 if retry_reason else 1
         if not claims:
             if context.status == "ready":
@@ -241,3 +261,29 @@ class GeminiAnswerGenerator:
 
 def _corrupted_text(value: str) -> bool:
     return any(symbol in value for symbol in ("\ufffd", "\u00b4", "Ã", "Â", "â€", "ΓÇ"))
+
+
+_NEGATIONS = {"không", "chưa", "not", "never", "no"}
+_WORD = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _reverses_negation(
+    claim: str, refs: tuple[str, ...], evidence: dict[str, str]
+) -> bool:
+    """Conservatively reject a positive predicate explicitly negated by its citation.
+
+    This is a narrow safety check, not general natural-language entailment.
+    """
+    claim_words = _WORD.findall(claim.casefold())
+    for ref in refs:
+        source_words = _WORD.findall(evidence.get(ref, "").casefold())
+        for index, word in enumerate(source_words[:-2]):
+            if word not in _NEGATIONS or source_words[index + 1] == "chỉ":
+                continue
+            phrase = source_words[index + 1 : index + 3]
+            for position in range(len(claim_words) - 1):
+                if claim_words[position : position + 2] == phrase and not any(
+                    prior in _NEGATIONS for prior in claim_words[max(0, position - 5) : position]
+                ):
+                    return True
+    return False

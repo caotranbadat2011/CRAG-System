@@ -1,344 +1,233 @@
-# CRAG System — ingestion and corrective evidence workflow
+# CRAG System
 
-This repository implements the auditable ingestion layer for a Corrective RAG system:
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Qdrant Hybrid Search](https://img.shields.io/badge/Qdrant-Hybrid%20Search-DC244C)
+![BGE-M3](https://img.shields.io/badge/Embeddings-BGE--M3-16A34A)
+![LangGraph](https://img.shields.io/badge/Workflow-LangGraph-6B46C1)
+![Gemini API](https://img.shields.io/badge/LLM-Gemini%20API-4285F4)
+![Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-2EA44F)
 
-```text
-source file -> immutable raw copy -> parse -> clean -> structural chunks
-            -> BGE-M3 dense + lexical weights -> Qdrant hybrid index
-            -> validation/search smoke test
-```
+> A source-aware Corrective Retrieval-Augmented Generation (CRAG) system for document question answering, with hybrid retrieval, three-way knowledge correction, and inspectable citations.
 
-## Supported input
+CRAG System ingests PDF, DOCX, Markdown, and text files; indexes dense and sparse representations in Qdrant; and answers questions using evidence selected from the indexed documents and, when needed, the web. A retrieval evaluator chooses one of three paths: **Correct**, **Incorrect**, or **Ambiguous**. The result includes the selected evidence and source locations so an answer can be inspected rather than taken on trust.
 
-- PDF (`.pdf`), including layout-aware text, headings, lists, tables,
-  formulas, columns, fonts, coordinates, extracted images, and passwords
-- Word (`.docx`), including rich text, localized/custom headings, lists,
-  nested tables, text boxes, headers/footers, footnotes, comments, and images
-- Markdown (`.md`, `.markdown`), including CommonMark/GFM structure, clean
-  inline text, source ranges, references, local image validation, and OCR hooks
-- Plain text (`.txt`) with safe multi-encoding fallback
+This is a local research/prototype application, **not a production-hardened or benchmark-validated service**. The current checkout uses Gemini for retrieval evaluation, web-query rewriting, and answer generation. Embedding and reranking run locally.
 
-Unsupported files are rejected explicitly. Empty documents, oversized inputs, unreadable PDFs, malformed DOCX archives, zero-token chunks, and inconsistent vector dimensions fail before indexing.
+## Contents
 
-## Project layout
+- [CRAG System](#crag-system)
+  - [Contents](#contents)
+  - [Features](#features)
+  - [Architecture](#architecture)
+  - [Tech stack](#tech-stack)
+  - [Quick start](#quick-start)
+    - [Prerequisites](#prerequisites)
+    - [Optional: Qdrant server](#optional-qdrant-server)
+  - [Usage](#usage)
+    - [Reading a result](#reading-a-result)
+  - [Project structure](#project-structure)
+  - [Validation and tests](#validation-and-tests)
+  - [Design decisions and limitations](#design-decisions-and-limitations)
+  - [Security and data handling](#security-and-data-handling)
+  - [License](#license)
 
-```text
-src/crag_ingestion/
-  parsers/       format-specific extraction and parser registry
-  embeddings/    BGE-M3 dense/sparse adapter and embedding contract
-  index/         Qdrant named vectors, payload, filtering, and hybrid search
-  retrieval/     BGE cross-encoder reranking and post-branch semantic diversity
-                 Gemini evaluation, internal refinement, query rewrite, DDGS web
-                 search, bounded page extraction, web filtering, context assembly,
-                 Gemini answer generation and citation validation
-  cleaning.py    Unicode/whitespace/control-char/margin normalization
-  chunking.py    structure-aware chunking with overlap and provenance
-  storage.py     atomic raw and processed artifact persistence
-  documents.py   upload, update, refresh, and delete document lifecycle
-  pipeline.py    ingestion and retrieval entry points
-  workflow.py    three-branch LangGraph routing and SQLite checkpoints
-  web.py         local JSON API and browser app server
-  static/        citation-aware browser UI
-  validation.py  integrity and traceability checks
-  cli.py         operational interface
-tests/           unit, format parser, index, and end-to-end tests
-data/            runtime artifacts (ignored by Git)
-```
+## Features
 
-Runtime artifacts are separated:
+| Area | Implemented behavior |
+| --- | --- |
+| Document ingestion | PDF, DOCX, Markdown/CommonMark + GFM extensions, and plain text; parsing, cleaning, structural chunks, source metadata, and immutable raw copies |
+| Hybrid retrieval | BGE-M3 1024-dimensional dense vectors and lexical sparse weights in Qdrant, combined with reciprocal rank fusion (RRF) |
+| Precision | `BAAI/bge-reranker-v2-m3` cross-encoder reranking before evaluation; semantic diversity selection after knowledge refinement |
+| Corrective routing | Gemini judges each candidate as relevant, irrelevant, or uncertain; the validated labels determine Correct, Incorrect, or Ambiguous |
+| Knowledge correction | Internal knowledge strips for Correct; web search for Incorrect; both sources for Ambiguous where available |
+| Grounded answers | Claim-level citation markers validated against selected evidence; explicit partial, insufficient-evidence, and model-abstained states |
+| Traceability | Chunk IDs, page/heading details, source offsets, content hashes, Qdrant payloads, and SQLite run checkpoints |
+| Local interface | Built-in loopback HTTP API and browser UI with persistent chat sessions, document management, and citation inspection |
 
-```text
-data/raw/<document-id>/<sha256>.<ext>   immutable source version
-data/raw/<document-id>/<sha256>.media/  content-addressed DOCX/PDF images
-data/processed/<document-id>/<sha256>.json  inspectable blocks and chunks
-data/qdrant/                            embedded Qdrant storage for local runs
-data/checkpoints/crag.sqlite3           LangGraph run history and evidence state
-data/uploads/<upload-id>/<filename>      browser-managed source files
-```
+## Architecture
 
-## Setup and usage
+![CRAG System architecture: document ingestion into Qdrant, hybrid retrieval, three corrective branches, and cited answer generation](docs/images/crag-architecture.png)
 
-```powershell
-python -m pip install -e ".[dev]"
-python -m crag_ingestion ingest .\documents
-python -m crag_ingestion list
-python -m crag_ingestion query "chính sách hoàn tiền" --limit 5
-python -m crag_ingestion query "chính sách hoàn tiền" --rerank --candidate-limit 30 --limit 10
-python -m crag_ingestion evaluate "chính sách hoàn tiền" --candidate-limit 30 --limit 10
-python -m crag_ingestion refine "chính sách hoàn tiền" --candidate-limit 30 --limit 10
-python -m crag_ingestion search-web "chính sách hoàn tiền" --candidate-limit 30 --limit 10
-python -m crag_ingestion run "chính sách hoàn tiền" --candidate-limit 30 --limit 10
-python -m crag_ingestion show-run RUN_ID
-python -m crag_ingestion serve --port 8000
-python -m crag_ingestion validate
-pytest
-```
+1. **Ingestion:** Parsers retain structure and provenance. Cleaning normalizes text; the chunker applies length limits and overlap. A pipeline signature and source checksum protect against stale indexes.
+2. **Retrieval:** BGE-M3 emits dense embeddings and lexical weights. Qdrant searches both named vectors and fuses the results with RRF. A BGE cross-encoder reranks the candidate chunks.
+3. **Evaluation:** Gemini returns one relevance label and reason per chunk ID. The application checks the response shape, IDs, and labels before routing; it does not treat the model's answer as an unvalidated confidence score.
+4. **Knowledge correction:** Relevant internal chunks become shorter, source-ordered knowledge strips. Incorrect/Ambiguous routes rewrite queries with Gemini, search via DDGS/DuckDuckGo, fetch eligible pages, and filter page passages. Search-result snippets are not accepted as evidence.
+5. **Context and answer:** A diversity filter reduces overlap among strips. Each selected strip receives a citation marker such as `[1]`. Gemini generates atomic claims; unknown or missing citation markers are rejected. LangGraph manages the three branches, and SQLite stores the run state.
 
-Open `http://127.0.0.1:8000/` after starting `serve`. The local browser app
-asks questions, displays the answer and branch, and lets you click each
-`[n]` citation to inspect the exact selected strip. Internal citations open
-the immutable raw source version captured by that run (PDF links include a
-page anchor); web citations open the fetched page URL. If a source was later
-deleted, its text remains in the checkpoint but the original file link may
-no longer be available.
+The diversity filter runs **after** retrieval evaluation and knowledge refinement. It does not silently change the chunks sent to the retrieval evaluator. For an Ambiguous result, the context assembler attempts to include both internal and web evidence; missing sources yield a `partial` context with a warning.
 
-The document panel supports uploading a new source, replacing a browser-uploaded
-source with a file of the same extension, refreshing any indexed document from
-its existing source path, and removing a document from Qdrant. Removal also
-deletes CRAG-managed raw/processed copies and browser-uploaded source files;
-it never deletes an external source file you indexed through the CLI. Historical
-SQLite checkpoints are retained. Uploads are limited by `max_file_bytes`
-(50 MiB by default) and supported parser extensions.
+## Tech stack
 
-The JSON API has `POST /api/ask`, `GET /api/runs/{run_id}`,
-`GET/POST /api/documents`, `GET/PUT/DELETE /api/documents/{document_id}`,
-`POST /api/documents/{document_id}/refresh`, and read-only source endpoints.
-Mutating requests require JSON and `X-CRAG-Local: 1`. The unauthenticated
-server binds to loopback only; do not expose it through a reverse proxy or
-port forwarding without adding authentication and authorization. Like the
-CLI, it sends selected evidence to Gemini and stores run evidence in SQLite.
+| Component | Technology |
+| --- | --- |
+| Language/runtime | Python 3.11+ |
+| Parsing | `pdfplumber` with `pypdf` fallback, DOCX parser, `markdown-it-py` and plugins |
+| Embeddings | `BAAI/bge-m3` via FlagEmbedding |
+| Vector database | Qdrant local mode by default; optional Qdrant server |
+| Reranker | `BAAI/bge-reranker-v2-m3` |
+| Evaluation, rewrite, answer | Gemini API; default model `gemini-3.5-flash-lite` |
+| Web knowledge | DDGS/DuckDuckGo and a bounded, safety-checked page fetcher |
+| Orchestration and checkpoints | LangGraph + SQLite |
+| UI/API | Python HTTP server + HTML/CSS/JavaScript, bound to `127.0.0.1`; SQLite chat sessions |
 
-Without `--qdrant-url`, the CLI uses Qdrant local mode under `data/qdrant`.
-For a Qdrant server, pass its URL and optionally keep the API key in a file:
+Qdrant's embedded mode needs no Docker container for the quick start. The embedding and reranker models are downloaded on first use; plan for their local disk and memory requirements.
+
+## Quick start
+
+### Prerequisites
+
+- Python 3.11 or newer.
+- Internet access for the initial model downloads and Gemini requests.
+- A Gemini API key for `evaluate`, `refine`, `search-web`, and `run` (retrieval-only `query` and ingestion do not need one).
+
+The commands below use PowerShell from the repository root. Replace the sample PDF path with a file you own; a `documents/` directory is **not** required.
 
 ```powershell
-python -m crag_ingestion `
-  --qdrant-url http://localhost:6333 `
-  --qdrant-collection crag_bge_m3_hybrid `
-  ingest .\documents
-
-python -m crag_ingestion `
-  --qdrant-url https://your-cluster.example `
-  --qdrant-api-key-file .\secrets\qdrant-api-key.txt `
-  query "chính sách hoàn tiền"
+git clone https://github.com/caotranbadat2011/CRAG-System.git
+cd CRAG-System
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-Every chunk is stored as a Qdrant point. The point payload retains document and
-chunk identifiers, source and artifact paths, content and pipeline hashes, model,
-text, heading path, pages, parser metadata, and provenance. Collections use
-named `dense` (1024 dimensions, Cosine) and `sparse` vectors.
-
-FlagEmbedding's BGE-M3 adapter is the only embedding backend. A single model
-inference produces the normalized 1024-dimensional `dense_vecs` and token-ID
-`lexical_weights`; the latter are stored as Qdrant sparse vectors. The default
-model is `BAAI/bge-m3`. `--embedding-model` accepts a BGE-M3-compatible model
-or local directory, not an arbitrary Sentence Transformers model. Querying
-prefetches dense and sparse candidates with the same filters and merges them
-with Qdrant reciprocal rank fusion (RRF).
-
-`query --rerank` takes up to `--candidate-limit` hybrid/RRF results, scores each
-query–chunk pair with `BAAI/bge-reranker-v2-m3`, and returns the best `--limit`
-chunks for a future retrieval evaluator. Its output keeps both
-`retrieval_score` (RRF) and `rerank_score` (cross-encoder logit); neither is a
-calibrated confidence for the Correct/Incorrect/Ambiguous decision. The model
-is loaded lazily and can be changed with `--reranker-model`. Python callers can
-use `IngestionPipeline.retrieve_for_evaluation(...)` directly. This stage
-reorders retrieved chunks; it does not change stored Qdrant vectors.
-
-`SemanticDiversityFilter` is deliberately separate from evaluator input. After
-the CRAG branch has refined internal and/or web knowledge into `KnowledgeStrip`
-objects, call `IngestionPipeline.select_diverse_context(...)` to select
-nonredundant passages by BGE-M3 dense-vector MMR. Each strip retains its
-`source_ref` (chunk ID or URL) for citations. For the Ambiguous branch, pass
-`min_per_source={"internal": 1, "web": 1}` to require both sources; an
-unsatisfiable quota raises an error instead of silently dropping a source.
-Internal refinement, web search, and cited context assembly are available.
-`run` also generates a cited answer from the selected context.
-
-The `evaluate` command runs hybrid retrieval, BGE reranking, then a single
-Gemini `generateContent` request for per-chunk labels. It defaults to the
-stable `gemini-3.5-flash-lite` model, which Google currently lists with a free tier.
-The request includes a structured JSON schema, and the response is also
-validated locally for every chunk ID,
-label, and explanation before the decision is accepted. At least one relevant
-chunk selects `Correct`; all irrelevant selects `Incorrect`; otherwise it
-selects `Ambiguous`. A missing key, rate limit, incomplete response, or invalid
-JSON fails explicitly rather than silently selecting a branch. These labels
-are not calibrated probabilities or a reproduction of the paper's fine-tuned
-T5 evaluator and should be checked against a labeled evaluation set.
-
-`refine` first evaluates the reranked chunks, then decomposes only internal
-evidence from `Correct` (relevant parents) or `Ambiguous` (relevant/uncertain
-parents) into short, source-ordered strips. It makes additional batched Gemini
-judgments for the strips and keeps only those labeled relevant. `Incorrect`
-returns no internal strips. Defaults are 360 characters, at most two sentences
-per strip, and 12 strips per evaluator call; the global flags
-`--strip-max-chars`, `--strip-max-sentences`, and `--strip-batch-size` tune these
-without re-ingesting. Each `KnowledgeStrip` retains its parent `chunk_id`,
-document ID, source/raw paths, pages, headings, parser source metadata, and
-exact half-open character offsets **within the indexed chunk**. Parser source
-ranges are preserved but cannot always be narrowed to a strip because the
-chunker may combine blocks or prepend overlap. The returned strips are ready
-for post-branch semantic diversity selection; `refine` does not call that
-selector or generate an answer.
-
-`search-web` evaluates retrieved chunks first. `Correct` makes no web request;
-`Incorrect` and `Ambiguous` use Gemini to rewrite up to two short queries,
-search DuckDuckGo through `ddgs` with `backend="duckduckgo"`, fetch at most five
-HTML/plain-text pages, split page text into short passages, rank them locally
-with BGE reranker, and keep only passages Gemini labels relevant. Search snippets
-are never treated as evidence. The JSON result includes each web strip's URL,
-page title, query, fetch timestamp, content hash, and half-open offsets in the
-extracted page text. For `Ambiguous`, call both `refine_internal_knowledge` and
-`search_web_knowledge`, then apply `select_diverse_context` with optional
-source quotas. For `Incorrect`, only the web strips should feed that selector.
-This command prepares cited evidence but does not synthesize an answer; use
-`run` for the complete workflow.
-DDGS results with blank or nonpublic `href` values are discarded before page
-selection. A search with no usable URL or a transient DDGS error is retried
-up to three total attempts with 0.5s/1s backoff by default. If all rewritten
-queries still yield no eligible URL, the original question is tried once with
-the same bounded retry policy (unless it duplicates a rewritten query).
-`queries` in the result lists the queries actually attempted. Warnings report
-the query number, attempt count, invalid/empty URL counts, and exception *type*
-without echoing raw exception messages or rejected URLs.
-
-`run` executes the complete corrective evidence workflow with LangGraph:
-
-```text
-hybrid retrieve → BGE rerank → Gemini evaluate
-  Correct   → internal refinement ────────────────┐
-  Incorrect → web knowledge search ───────────────┼→ diversity filter → cited context
-  Ambiguous → internal refinement → web search ───┘                     → Gemini answer
-```
-
-The Ambiguous route asks the diversity selector to retain at least one strip
-from each source when both have evidence. If a source is missing, the strip
-limit is too small, or sources are near-duplicates, the result is marked
-`partial` with a warning. If no relevant strip remains, the status is
-`no_evidence`; no search snippet is substituted. `ready` means selected
-evidence exists (and both sources are represented for Ambiguous), not that
-the evidence has been independently fact-checked.
-
-The output contains a bounded JSONL `context_text` with `[1]`, `[2]`, …
-markers, matching `citations` containing the original chunk ID or URL and
-source offsets/metadata. Strips are never cut mid-text to fit the context
-budget; over-budget strips are omitted with a warning. Use global
-`--context-max-strips` and `--context-max-chars` before `run` to tune the
-default 8 strips and 6,000 characters. The diversity weights remain 0.6
-for relevance and 0.85 for duplicate rejection.
-
-The answer node uses the configured `--evaluator-model` (default
-`gemini-3.5-flash-lite`) and the existing `GEMINI_API_KEY`. Gemini returns
-atomic claims with citation-marker arrays; the application validates every
-marker against the selected context and attaches the matching source metadata
-in `answer.citations`. Invalid or missing markers fail explicitly. For
-`partial` context, the answer starts with an evidence-limitation notice. For
-`no_evidence`, no generation API call is made and the answer abstains. Gemini
-may also abstain when available evidence does not answer the question. If it
-abstains despite `ready` context, the answer node retries once with the same
-selected evidence and an explicit citation-by-citation grounding instruction.
-The retry never forces unsupported claims. If Gemini still returns no claims,
-the result is `model_abstained`, not `insufficient_evidence`; the UI shows the
-answer state separately from the retrieval branch and context state. Safe
-diagnostics (`answer.attempts` and `answer.retry_reason`) are stored without
-recording raw Gemini responses, source text, or API keys. This retry can use
-one additional generation request. Citation
-validation checks references, not whether each claim is actually supported;
-important claims still need independent factual review.
-The answer defaults to at most 12 claims and 4,096 Gemini output tokens;
-`--answer-max-claims` (1–20) and `--answer-max-output-tokens` (512–8,192)
-can be passed before `run` to adjust detail. More tokens cannot create
-facts absent from the selected context.
-
-Each `run` creates a new SQLite checkpoint thread and returns its `run_id`.
-`show-run RUN_ID` reads its completed result without reopening Qdrant or
-calling models/APIs. The database is under `data/checkpoints/` by default and
-is ignored by Git. It stores retrieved text and web evidence, so protect it
-as sensitive data and apply a retention policy for longer-running deployments.
-Checkpoint deserialization uses LangGraph's strict msgpack allowlist. This
-local SQLite saver is intended for lightweight synchronous use, not a
-multi-worker production service. New runs checkpoint the answer as well as the
-context. Older context-only checkpoints remain readable with `answer: null`.
-
-Global options `--web-max-pages`, `--web-results-per-query`, `--web-region`,
-`--web-search-attempts`, `--web-search-backoff`, and repeatable
-`--web-allowed-domain` limit web retrieval; options precede the
-subcommand. For example:
-
-```powershell
-python -m crag_ingestion --web-max-pages 3 `
-  --web-allowed-domain example.org search-web "chính sách hoàn tiền"
-```
-
-Page fetching accepts only public HTTP(S) targets on standard ports, checks
-DNS and redirects, rejects oversized or non-text responses, and removes common
-navigation/script content. These checks reduce risk but are not a sandbox for
-hostile pages. Retrieved web content and questions are sent to Gemini for
-relevance judgment; review provider privacy requirements and factual claims
-before using them in an answer. DDGS availability and site access can vary,
-so failed searches/pages are reported as warnings. A page with no relevant
-strip yields no external evidence rather than falling back to its snippet.
-
-Create a Gemini API key in Google AI Studio. Never store it in the repository;
-set `GEMINI_API_KEY` only in your current process:
+Set the Gemini key in the current shell without putting it in command history or committing it:
 
 ```powershell
 $secret = Read-Host "Gemini API key" -AsSecureString
 $env:GEMINI_API_KEY = [System.Net.NetworkCredential]::new("", $secret).Password
-python -m crag_ingestion evaluate "chính sách hoàn tiền" --limit 5
-Remove-Item Env:GEMINI_API_KEY
 ```
 
-The evaluator sends retrieved chunk text to Gemini. Do not enable it for
-confidential documents without checking your data-sharing requirements and
-the chosen provider's policies. Google's [pricing page](https://ai.google.dev/gemini-api/docs/pricing)
-currently says free-tier data may be used to improve its products. The embedding
-and reranker remain local. An environment variable already set in PowerShell
-takes precedence over `.env`. To use another Gemini model, put the global
-option before the command, e.g. `python -m crag_ingestion --evaluator-model gemini-3.5-flash-lite evaluate "câu hỏi"`.
-HTTP 429 indicates quota/rate limits; HTTP 404 usually means the selected model
-is unavailable. Provider error messages are not echoed because they may contain
-document text or sensitive data.
+Ingest a file and ask a question:
 
-The default Qdrant collection is `crag_bge_m3_hybrid`. The prior dense-only
-`crag_bge_m3` collection is left untouched; re-ingest source documents into the
-new collection. An explicitly selected collection with an incompatible vector
-schema or dimension is rejected rather than overwritten.
+```powershell
+.\.venv\Scripts\python.exe -m crag_ingestion ingest .\path\to\your-file.pdf
+.\.venv\Scripts\python.exe -m crag_ingestion list
+.\.venv\Scripts\python.exe -m crag_ingestion run "Tài liệu này giải quyết vấn đề gì?" --candidate-limit 10 --limit 3
+```
 
-Keep the same model for ingestion and querying. A change to cleaning, chunking,
-parser support, model, or model-derived dimensions changes the pipeline signature;
-re-ingestion then replaces the document atomically. Unchanged content is skipped
-by default, while `--force` rebuilds it.
+Start the browser UI in a separate terminal, then open <http://127.0.0.1:8000/>:
 
-Retrieval checks the stored pipeline signature and original source checksum
-before using any indexed chunk. When a parser or other ingestion setting has
-changed, the source file has changed, or the source is missing, `query`,
-`evaluate`, and `run` stop with an actionable error instead of sending stale
-evidence to the evaluator or answer model. `list` and the web document list
-show `index_status` (`current`, `outdated_pipeline`, `source_changed`, or
-`source_missing`). Use **Làm mới** in the local web app or re-ingest the
-original file to rebuild an outdated document. A missing original source must
-be restored or uploaded again; old saved runs remain historical snapshots.
+```powershell
+.\.venv\Scripts\python.exe -m crag_ingestion serve --port 8000
+```
 
-## Validation contract
+You can also upload a document directly in the UI. Uploaded sources are stored under `data/uploads/`, then ingested. Do not delete an indexed source file without first removing or replacing that document in the application: queries intentionally reject missing or changed sources.
 
-`validate` checks Qdrant collection status, dense/sparse schema, distance and
-dimensions, point and
-document chunk counts, raw/processed artifact existence, contiguous ordinals,
-text lengths, payload structure, dense dimensions and L2 norms, sparse token IDs
-and lexical weights, provenance,
-and PDF page references. It exits non-zero if any error is found; warnings remain
-visible without failing the index.
+The browser UI groups questions and cited answers into chat sessions. Use **+ Tạo mới** to start a session, choose an existing session in the sidebar to reopen it after a restart, **Đổi tên** to set a custom title, or **Xóa phiên** to remove its messages. Each assistant message retains its CRAG `run_id` and citation snapshot. Deleting a chat does not delete its saved CRAG runs or indexed documents.
 
-DOCX formatting is stored as ordered run metadata on each block rather than mixed
-into embedding text. List definitions, table hierarchy, note/comment identifiers,
-part names, image hashes, MIME types, alternative text, and extracted asset paths
-remain available in processed artifacts and chunk source metadata.
+### Optional: Qdrant server
 
-Markdown parsing follows CommonMark plus GFM tables, strikethrough, task lists,
-footnotes, definition lists, YAML front matter, and colon-fence admonitions. It
-emits clean embedding text while preserving inline formatting, links, images,
-table/list structure, reference definitions, and exact source line/character
-ranges as metadata. Local image targets are validated, and callers may inject an
-OCR function through `MarkdownParser(image_ocr=...)` without coupling ingestion
-to one OCR engine.
+Without `--qdrant-url`, storage is local under `data/qdrant/`. To use an already running Qdrant server, pass its URL as a **global option before the subcommand**:
 
-PDF parsing uses `pdfplumber` for word coordinates, reading order, multi-column
-layout, and tables, with a coordinate-aware `pypdf` fallback. Font name, size,
-bold/italic flags, bounding boxes, list markers, formula hints, headings, vector
-graphics, and page provenance are retained. Embedded images are extracted by
-content hash. Image-only pages retain image blocks and emit a warning when they
-have no extractable text; no image text recognition is performed. Encrypted files
-accept a direct password, a per-file password provider, or the CLI's
-`--pdf-password-file` option.
+```powershell
+.\.venv\Scripts\python.exe -m crag_ingestion --qdrant-url http://localhost:6333 ingest .\path\to\your-file.pdf
+.\.venv\Scripts\python.exe -m crag_ingestion --qdrant-url http://localhost:6333 serve
+```
+
+Use the same URL, collection, embedding model, and data directory for ingestion and querying. For a secured Qdrant server, pass `--qdrant-api-key-file` rather than a key on the command line. The default collection is `crag_bge_m3_hybrid`; an incompatible existing collection is rejected, not overwritten.
+
+## Usage
+
+| Command | Purpose |
+| --- | --- |
+| `ingest PATH` | Index a file or supported files in a directory (`--force` rebuilds an unchanged source) |
+| `list` | Show indexed documents and `index_status` |
+| `query TEXT` | Inspect hybrid/RRF retrieval; add `--rerank` for cross-encoder scores |
+| `evaluate TEXT` | Rerank candidates, label them, and inspect the selected CRAG branch |
+| `refine TEXT` | Evaluate and produce internal knowledge strips |
+| `search-web TEXT` | Evaluate, search/fetch web sources where needed, and filter web knowledge |
+| `run TEXT` | Execute the full three-branch workflow and generate a cited answer |
+| `show-run RUN_ID` | Read a saved SQLite result without rerunning retrieval or calling APIs |
+| `serve` | Start the local browser UI/API |
+| `validate` | Check index, vectors, artifacts, and provenance invariants |
+
+For example, to scope a question to one indexed document:
+
+```powershell
+.\.venv\Scripts\python.exe -m crag_ingestion run "Tóm tắt phần Abstract" --document-id DOCUMENT_ID --candidate-limit 10 --limit 3
+```
+
+`--candidate-limit` is the number of hybrid candidates considered for reranking; `--limit` is the number sent to retrieval evaluation. Global settings such as `--evaluator-model`, `--context-max-chars`, and `--web-max-pages` go **before** the subcommand:
+
+```powershell
+.\.venv\Scripts\python.exe -m crag_ingestion --web-max-pages 3 --context-max-chars 6000 run "Câu hỏi" --limit 3
+```
+
+The UI/API supports document upload, replacement of UI-managed files, refresh, deletion, persistent chat sessions, question answering, completed-run lookup, and original-source links. Chat routes are `GET/POST /api/chats`, `GET/PUT/DELETE /api/chats/{session_id}` (`PUT` accepts `{"title":"..."}`), and `POST /api/chats/{session_id}/messages`. The existing one-shot `POST /api/ask` remains available. Mutating requests require JSON and `X-CRAG-Local: 1`. The server binds only to loopback and has no user authentication.
+
+### Reading a result
+
+- `decision.action` is `Correct`, `Incorrect`, or `Ambiguous`.
+- `status` describes the assembled context: `ready`, `partial`, or `no_evidence`.
+- `answer.status` distinguishes `answered`, `partial`, `insufficient_evidence`, and `model_abstained`.
+- `citations` map answer markers to a chunk ID or web URL and source metadata. A marker confirms that the cited strip was selected; it is **not** automatic proof that every claim is factually entailed by that strip.
+- `warnings` report unavailable/filtered web pages and context limitations without turning search snippets into evidence.
+
+## Project structure
+
+```text
+src/crag_ingestion/
+  parsers/       PDF, DOCX, Markdown, TXT and parser registry
+  embeddings/    BGE-M3 dense/sparse adapter
+  index/         Qdrant schema, payloads, filters, hybrid search
+  retrieval/     reranking, evaluation, refinement, web search,
+                 diversity selection, context and answer generation
+  cleaning.py    Unicode/whitespace/control-character normalization
+  chunking.py    structure-aware chunks with overlap and provenance
+  storage.py     immutable raw and processed artifact storage
+  documents.py   document upload/update/refresh/delete lifecycle
+  pipeline.py    ingestion and retrieval entry points
+  workflow.py    LangGraph branches and SQLite checkpoints
+  chat.py        persistent chat sessions and message history
+  web.py         loopback HTTP API
+  static/        browser interface
+  validation.py index and provenance checks
+  cli.py         command-line interface
+tests/           parser, retrieval, workflow, API, and lifecycle tests
+data/            runtime state (ignored by Git)
+```
+
+Runtime data is separated by purpose:
+
+```text
+data/raw/          immutable source copies and extracted media
+data/processed/    parsed blocks, chunks, and metadata
+data/qdrant/       embedded Qdrant collection (when no server URL is set)
+data/checkpoints/  SQLite run history and chats.sqlite3
+data/uploads/      sources uploaded through the browser UI
+```
+
+`documents/` is not a required runtime directory. Do not treat `data/` as disposable cache: it contains indexed vectors, sources, and saved evidence.
+
+## Validation and tests
+
+```powershell
+.\.venv\Scripts\python.exe -m crag_ingestion validate
+.\.venv\Scripts\python.exe -m pytest
+```
+
+`validate` checks the Qdrant vector schema and dimensions, dense norms, sparse weights, document/chunk counts, stored artifacts, hashes, and provenance including PDF page references. Retrieval separately checks the source checksum and pipeline signature. If parsing, chunking, cleaning, or embedding semantics change, the affected documents must be refreshed or re-ingested; the system blocks queries against stale evidence instead of silently using it.
+
+After updating from a version with the older PDF layout/refinement logic, restart `serve` and use the document **Refresh** action (or rerun `ingest PATH --force`) before asking the same question again. Saved chat answers are historical snapshots and are not rewritten by re-indexing.
+
+Tests exercise the implemented components, but this repository does **not** yet publish a labeled QA benchmark or measured answer-accuracy, latency, or throughput results. The evaluator's labels are not calibrated probabilities and are not a reproduction of the original CRAG paper's trained evaluator.
+
+## Design decisions and limitations
+
+- **Preserve evidence before summarizing:** Internal strips retain their parent chunk ID, page/heading metadata, and offsets within the indexed chunk. Web strips retain URL, fetched-page details, and offsets. Some parser source ranges cannot be narrowed exactly after overlapping chunks are assembled.
+- **No mid-strip truncation:** The context has bounded strip and character budgets (8 strips / 6,000 characters by default). A strip that cannot fit is omitted with a warning. Diversity defaults to relevance weight `0.6` and duplicate threshold `0.85`.
+- **PDF OCR is not included:** Layout, text, tables, coordinates, and extractable images are handled, but an image-only page is not transcribed. Markdown image OCR is only an injectable hook, not a built-in OCR service.
+- **External services can fail:** Gemini quotas/model access and DDGS availability affect evaluation and web branches. Failed web retrieval does not make a search snippet trustworthy evidence.
+- **Model judgments can be wrong:** Relevance labels, rewritten queries, and grounded answers still need evaluation against a labeled dataset. Citation-marker validation checks reference integrity, not semantic entailment.
+- **Negation safeguard is narrow:** PDF lines are not treated as sentence boundaries during knowledge refinement, and answer generation retries or omits claims that plainly reverse a negated predicate in their cited strip. This does not prove that every answer is entailed by its citations.
+- **Chat history is not retrieval memory:** Sessions persist the conversation and citations, but each new question runs through CRAG independently. Pronoun-based follow-ups may need an explicit subject; prior turns are not silently added to retrieval or Gemini prompts.
+- **Local web server only:** The synchronous SQLite checkpoint store and unauthenticated loopback UI are suitable for local testing, not multi-worker public deployment.
+
+## Security and data handling
+
+The indexed payloads, SQLite checkpoints, and chat history contain questions, answers, document text, and retrieved web evidence. Protect the `data/` directory and define a retention policy for sensitive sources. The `.env` file and runtime data are ignored by Git, but verify the files you commit. Do not put API keys in source code, screenshots, terminal transcripts, or issue reports.
+
+When Gemini is used, the selected passages, questions, and evidence needed by the relevant step are sent to Google's API. Review the provider's data-handling terms before using confidential documents. The web fetcher restricts URLs, redirects, response size, and content type, but these safeguards are **not** a complete sandbox for untrusted pages. Never expose the local UI to the public internet without authentication and additional hardening.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

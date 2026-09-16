@@ -214,13 +214,15 @@ def _extract_with_pdfplumber(
     ]
     segments, split_rows = _word_segments(outside_words, width)
     text_blocks = [_segment_block(segment, page_number, source_path, width, height) for segment in segments]
-    combined = _order_columns([*text_blocks, *table_blocks], width, split_rows)
+    all_blocks = [*text_blocks, *table_blocks]
+    multi_column = _has_two_columns(text_blocks, width, height, split_rows)
+    combined = _order_columns(all_blocks, width, multi_column)
     return combined, {
         "width": width,
         "height": height,
         "word_count": len(words),
         "table_count": len(table_blocks),
-        "multi_column": bool(split_rows >= 2),
+        "multi_column": multi_column,
     }
 
 
@@ -332,12 +334,13 @@ def _extract_with_pypdf(
                 )
     segments, split_rows = _word_segments(fragments, width)
     blocks = [_segment_block(segment, page_number, source_path, width, height) for segment in segments]
-    return _order_columns(blocks, width, split_rows), {
+    multi_column = _has_two_columns(blocks, width, height, split_rows)
+    return _order_columns(blocks, width, multi_column), {
         "width": width,
         "height": height,
         "fragment_count": len(fragments),
         "table_count": 0,
-        "multi_column": bool(split_rows >= 2),
+        "multi_column": multi_column,
     }
 
 
@@ -454,8 +457,36 @@ def _multiply_matrix(left: list[float], right: list[float]) -> list[float]:
     ]
 
 
-def _order_columns(blocks: list[TextBlock], page_width: float, split_rows: int) -> list[TextBlock]:
+def _has_two_columns(
+    blocks: list[TextBlock], page_width: float, page_height: float, split_rows: int
+) -> bool:
+    """Require two substantial body rows, not a split formula and page footer."""
     if split_rows < 2:
+        return False
+    rows: dict[int, list[TextBlock]] = defaultdict(list)
+    for block in blocks:
+        row_id = block.metadata.get("row_id")
+        if isinstance(row_id, int):
+            rows[row_id].append(block)
+    qualifying = 0
+    for row in rows.values():
+        if len(row) < 2:
+            continue
+        ordered = sorted(row, key=lambda block: float(block.metadata["bbox"][0]))
+        left, right = ordered[0], ordered[-1]
+        top = float(left.metadata["bbox"][1])
+        if (
+            page_height * 0.03 <= top <= page_height * 0.90
+            and len(left.text) >= 6 and len(right.text) >= 6
+            and float(left.metadata["bbox"][2]) < page_width * 0.58
+            and float(right.metadata["bbox"][0]) > page_width * 0.42
+        ):
+            qualifying += 1
+    return qualifying >= 2
+
+
+def _order_columns(blocks: list[TextBlock], page_width: float, multi_column: bool) -> list[TextBlock]:
+    if not multi_column:
         return sorted(blocks, key=lambda block: (float(block.metadata["bbox"][1]), float(block.metadata["bbox"][0])))
     split_pairs: list[tuple[float, float]] = []
     rows: dict[int, list[TextBlock]] = defaultdict(list)

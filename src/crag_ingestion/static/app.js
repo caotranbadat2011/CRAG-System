@@ -53,7 +53,7 @@ function renderAnswer(answer) {
   }
 }
 
-function renderRun(result) {
+function renderRun(result, scroll = true) {
   byId("result-panel").hidden = false;
   const answerStates = {
     answered: "Đã trả lời",
@@ -107,7 +107,117 @@ function renderRun(result) {
     card.append(text("blockquote", citation.text || "Đoạn nguồn không còn trong context."));
     list.append(card);
   }
-  byId("result-panel").scrollIntoView({behavior: "smooth", block: "start"});
+  if (scroll) byId("result-panel").scrollIntoView({behavior: "smooth", block: "start"});
+}
+
+let activeChatId = null;
+let chatBusy = false;
+
+function setChatBusy(value) {
+  chatBusy = value;
+  byId("send-chat").disabled = value;
+  byId("new-chat").disabled = value;
+  byId("rename-chat").disabled = value;
+  byId("delete-chat").disabled = value;
+}
+
+function renderSessionList(sessions) {
+  const list = byId("chat-sessions");
+  list.replaceChildren();
+  if (!sessions.length) list.append(text("p", "Chưa có phiên nào.", "muted"));
+  for (const session of sessions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `chat-session${session.session_id === activeChatId ? " active" : ""}`;
+    button.append(text("span", session.title, "chat-session-title"));
+    button.append(text("span", `${session.turn_count} lượt hỏi`, "chat-session-meta"));
+    button.addEventListener("click", () => {
+      if (!chatBusy) openChat(session.session_id).catch((error) => setStatus("ask-status", error.message, true));
+    });
+    list.append(button);
+  }
+}
+
+async function refreshSessionList() {
+  const data = await request("/api/chats");
+  renderSessionList(data.sessions);
+  return data.sessions;
+}
+
+function showNewChat() {
+  activeChatId = null;
+  byId("chat-title").textContent = "Cuộc trò chuyện mới";
+  byId("rename-chat").hidden = true;
+  byId("delete-chat").hidden = true;
+  byId("chat-messages").replaceChildren(text("p", "Bắt đầu bằng một câu hỏi về tài liệu. Các lượt trao đổi sẽ được lưu trong phiên này.", "chat-empty"));
+  byId("result-panel").hidden = true;
+  byId("question").value = "";
+  setStatus("ask-status", "");
+}
+
+function addAnswerText(container, value, result) {
+  for (const part of value.split(/(\[\d+\])/g)) {
+    if (/^\[\d+\]$/.test(part) && result) {
+      const button = text("button", part, "cite-button");
+      button.type = "button";
+      button.title = "Xem nguồn trích dẫn";
+      button.addEventListener("click", () => {
+        renderRun(result);
+        const target = byId(`citation-${part.slice(1, -1)}`);
+        if (target) target.scrollIntoView({behavior: "smooth", block: "center"});
+      });
+      container.append(button);
+    } else {
+      container.append(document.createTextNode(part));
+    }
+  }
+}
+
+function renderConversation(session) {
+  activeChatId = session.session_id;
+  byId("chat-title").textContent = session.title;
+  byId("rename-chat").hidden = false;
+  byId("delete-chat").hidden = false;
+  const list = byId("chat-messages");
+  list.replaceChildren();
+  if (!session.messages.length) {
+    list.append(text("p", "Bắt đầu bằng một câu hỏi về tài liệu. Các lượt trao đổi sẽ được lưu trong phiên này.", "chat-empty"));
+  }
+  for (const message of session.messages) {
+    const card = document.createElement("article");
+    card.className = `chat-message ${message.role}`;
+    card.append(text("div", message.role === "user" ? "Bạn" : "CRAG", "chat-message-head"));
+    const body = document.createElement("div");
+    body.className = "chat-message-body";
+    if (message.role === "assistant") addAnswerText(body, message.text, message.result);
+    else body.textContent = message.text;
+    card.append(body);
+    if (message.role === "assistant" && message.result) {
+      const actions = document.createElement("div");
+      actions.className = "chat-message-actions";
+      const source = text("button", `Xem nguồn · ${message.run_id?.slice(0, 8) || "run"}`);
+      source.type = "button";
+      source.addEventListener("click", () => renderRun(message.result));
+      actions.append(source);
+      card.append(actions);
+    }
+    list.append(card);
+  }
+  list.scrollTop = list.scrollHeight;
+}
+
+async function openChat(sessionId) {
+  const session = await request(`/api/chats/${sessionId}`);
+  renderConversation(session);
+  byId("result-panel").hidden = true;
+  byId("question").value = "";
+  await refreshSessionList();
+}
+
+async function initializeChats() {
+  const sessions = await refreshSessionList();
+  if (sessions.length) await openChat(sessions[0].session_id);
+  else showNewChat();
 }
 
 async function loadDocuments() {
@@ -213,25 +323,79 @@ async function changeDocument(documentId, action) {
 
 byId("ask-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const button = event.submitter;
-  button.disabled = true;
+  if (chatBusy) return;
+  const question = byId("question").value.trim();
+  if (!question) return;
+  setChatBusy(true);
   setStatus("ask-status", "Đang retrieval, kiểm tra bằng chứng và tạo câu trả lời…");
   try {
-    const data = await request("/api/ask", {
+    if (!activeChatId) {
+      const created = await request("/api/chats", {
+        method: "POST", headers: localHeaders, body: "{}",
+      });
+      activeChatId = created.session_id;
+    }
+    const session = await request(`/api/chats/${activeChatId}/messages`, {
       method: "POST", headers: localHeaders,
       body: JSON.stringify({
-        question: byId("question").value,
+        question,
         candidate_limit: Number(byId("candidate-limit").value),
         limit: Number(byId("limit").value),
         document_id: byId("scope").value || null,
       }),
     });
-    renderRun(data);
-    setStatus("ask-status", `Hoàn tất · ${data.branch} · ${data.run_id}`);
+    renderConversation(session);
+    byId("question").value = "";
+    const last = session.messages.at(-1);
+    if (last?.result) renderRun(last.result, false);
+    await refreshSessionList();
+    setStatus("ask-status", `Đã lưu vào phiên · ${last?.result?.branch || "CRAG"}`);
+  } catch (error) {
+    setStatus("ask-status", error.message, true);
+    await refreshSessionList().catch(() => {});
+  } finally {
+    setChatBusy(false);
+  }
+});
+
+byId("new-chat").addEventListener("click", async () => {
+  if (chatBusy) return;
+  showNewChat();
+  await refreshSessionList().catch((error) => setStatus("ask-status", error.message, true));
+  byId("question").focus();
+});
+
+byId("rename-chat").addEventListener("click", async () => {
+  if (chatBusy || !activeChatId) return;
+  const proposed = window.prompt("Tên phiên trò chuyện (tối đa 100 ký tự):", byId("chat-title").textContent);
+  if (proposed === null) return;
+  setChatBusy(true);
+  try {
+    const session = await request(`/api/chats/${activeChatId}`, {
+      method: "PUT", headers: localHeaders, body: JSON.stringify({title: proposed}),
+    });
+    renderConversation(session);
+    await refreshSessionList();
+    setStatus("ask-status", "Đã đổi tên phiên trò chuyện.");
   } catch (error) {
     setStatus("ask-status", error.message, true);
   } finally {
-    button.disabled = false;
+    setChatBusy(false);
+  }
+});
+
+byId("delete-chat").addEventListener("click", async () => {
+  if (chatBusy || !activeChatId || !window.confirm("Xóa phiên trò chuyện và các tin nhắn trong phiên? Các run CRAG đã lưu vẫn được giữ lại.")) return;
+  setChatBusy(true);
+  try {
+    await request(`/api/chats/${activeChatId}`, {method: "DELETE", headers: localHeaders});
+    showNewChat();
+    const sessions = await refreshSessionList();
+    if (sessions.length) await openChat(sessions[0].session_id);
+  } catch (error) {
+    setStatus("ask-status", error.message, true);
+  } finally {
+    setChatBusy(false);
   }
 });
 
@@ -250,3 +414,4 @@ byId("run-form").addEventListener("submit", async (event) => {
   }
 });
 loadDocuments().catch((error) => setStatus("document-status", error.message, true));
+initializeChats().catch((error) => setStatus("ask-status", error.message, true));

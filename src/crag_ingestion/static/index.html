@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CRAG · Hỏi đáp có nguồn</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/chat.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -17,18 +18,29 @@
       <div class="eyebrow">CORRECTIVE RETRIEVAL-AUGMENTED GENERATION</div>
       <h1>Đặt câu hỏi. Kiểm tra từng nguồn.</h1>
       <p>Câu trả lời được tạo từ các đoạn bằng chứng đã chọn. Nhấn vào ký hiệu trích dẫn để xem đoạn nguồn và vị trí trong tài liệu.</p>
-      <form id="ask-form">
-        <label for="question">Câu hỏi</label>
-        <textarea id="question" rows="3" maxlength="5000" placeholder="Ví dụ: Tài liệu giới thiệu bài toán gì?" required></textarea>
-        <div class="form-row">
-          <label class="field">Phạm vi tài liệu<select id="scope"><option value="">Toàn bộ tài liệu</option></select></label>
-          <label class="field small">Ứng viên<input id="candidate-limit" type="number" min="1" max="100" value="10"></label>
-          <label class="field small">Đánh giá<input id="limit" type="number" min="1" max="100" value="3"></label>
-          <button type="submit" class="primary">Hỏi CRAG</button>
-        </div>
-      </form>
-      <div id="ask-status" class="status" role="status" aria-live="polite"></div>
     </section>
+
+    <div class="chat-layout">
+      <aside class="panel chat-sidebar" aria-label="Phiên trò chuyện">
+        <div class="section-heading"><h2>Hội thoại</h2><button id="new-chat" class="secondary" type="button">+ Tạo mới</button></div>
+        <div id="chat-sessions" class="chat-sessions"></div>
+      </aside>
+      <section class="panel chat-main" aria-label="Nội dung hội thoại">
+        <div class="section-heading chat-heading"><div><div class="eyebrow">TRỢ LÝ CRAG</div><h2 id="chat-title">Cuộc trò chuyện mới</h2></div><div class="chat-heading-actions"><button id="rename-chat" class="secondary" type="button" hidden>Đổi tên</button><button id="delete-chat" class="danger" type="button" hidden>Xóa phiên</button></div></div>
+        <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-label="Tin nhắn"></div>
+        <form id="ask-form" class="chat-form">
+          <label for="question">Tin nhắn</label>
+          <textarea id="question" rows="3" maxlength="5000" placeholder="Ví dụ: Tài liệu giới thiệu bài toán gì?" required></textarea>
+          <div class="form-row">
+            <label class="field">Phạm vi tài liệu<select id="scope"><option value="">Toàn bộ tài liệu</option></select></label>
+            <label class="field small">Ứng viên<input id="candidate-limit" type="number" min="1" max="100" value="10"></label>
+            <label class="field small">Đánh giá<input id="limit" type="number" min="1" max="100" value="3"></label>
+            <button id="send-chat" type="submit" class="primary">Gửi câu hỏi</button>
+          </div>
+        </form>
+        <div id="ask-status" class="status" role="status" aria-live="polite"></div>
+      </section>
+    </div>
 
     <section id="result-panel" class="panel result" hidden>
       <div class="section-heading"><div><div class="eyebrow">KẾT QUẢ</div><h2>Câu trả lời</h2></div><div id="result-badges" class="badges"></div></div>

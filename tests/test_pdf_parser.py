@@ -217,6 +217,43 @@ def test_pdf_recovers_spacing_when_layout_tokens_are_fused(tmp_path: Path) -> No
     assert blocks[1].metadata["position_precision"] == "page"
 
 
+def test_pdf_formula_and_footer_do_not_create_false_two_column_layout(tmp_path: Path) -> None:
+    class Page:
+        mediabox = type("Box", (), {"width": 595.0, "height": 842.0})()
+
+        @staticmethod
+        def extract_text() -> str:
+            return ""
+
+    def word(value: str, x0: float, x1: float, top: float) -> dict[str, object]:
+        return {
+            "text": value, "x0": x0, "x1": x1, "top": top,
+            "bottom": top + 12, "fontname": "Regular", "size": 12,
+        }
+
+    class Plumber:
+        @staticmethod
+        def find_tables() -> list[object]:
+            return []
+
+        @staticmethod
+        def extract_words(**_: object) -> list[dict[str, object]]:
+            return [
+                word("Hai ràng buộc: 31.0% câu có ngữ cảnh không", 72, 515, 250),
+                word("1 m", 187, 231, 270), word("1 k", 337, 377, 270),
+                word("nhét vừa một cửa sổ 256 token.", 72, 520, 290),
+                word("University of Science", 72, 386, 790),
+                word("Page 3", 489, 523, 790),
+            ]
+
+    blocks, metadata = extract_page_layout(Page(), Plumber(), 4, tmp_path / "source.pdf")
+    assert metadata["multi_column"] is False
+    assert next(i for i, block in enumerate(blocks) if "không" in block.text) < next(
+        i for i, block in enumerate(blocks) if "nhét vừa" in block.text
+    )
+    assert all(block.metadata.get("layout") != "multi_column" for block in blocks)
+
+
 def test_pdf_pipeline_persists_and_validates_image_provenance(
     tmp_path: Path, fake_embedder: Embedder
 ) -> None:

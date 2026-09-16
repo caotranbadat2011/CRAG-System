@@ -11,7 +11,11 @@ from .evaluator import CorrectiveAction, EvaluationDecision, Relevance, Retrieva
 from .service import RerankedHit
 
 
-_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+|\n+")
+# PDF physical lines are often separate blocks joined by blank lines in chunks.
+# A newline alone cannot be treated as a sentence boundary: it can separate
+# "không" from the verb it negates. Requiring a capitalized next sentence also
+# avoids splitting OCR/PDF decimals such as "31 . 0%" at the period.
+_BOUNDARY = re.compile(r"(?<=[.!?。！？])\s+(?=[A-ZÀ-ỴĐ])")
 
 
 class KnowledgeRefiner:

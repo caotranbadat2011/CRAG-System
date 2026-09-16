@@ -49,6 +49,8 @@ def test_local_api_and_document_lifecycle(
                     assert b"CRAG System" in response.read()
                 with urlopen(base + "/app.js", timeout=10) as response:
                     assert b"renderRun" in response.read()
+                with urlopen(base + "/chat.css", timeout=10) as response:
+                    assert b"chat-layout" in response.read()
                 status, body = _request(base, "/api/documents")
                 assert status == 200 and body["documents"] == []
                 status, _ = _request(base, "/api/documents", "POST", {
@@ -93,6 +95,45 @@ def test_local_api_and_document_lifecycle(
                 status, old = _request(base, "/api/runs/" + "a" * 32)
                 assert status == 200 and old["run_id"] == "a" * 32
 
+                status, _ = _request(base, "/api/chats", "POST", local=False)
+                assert status == 400
+                status, chat = _request(base, "/api/chats", "POST")
+                assert status == 201 and chat["messages"] == []
+                session_id = chat["session_id"]
+                status, renamed = _request(base, f"/api/chats/{session_id}", "PUT", {
+                    "title": "  Hội thoại   thử nghiệm  ",
+                })
+                assert status == 200 and renamed["title"] == "Hội thoại thử nghiệm"
+                assert _request(base, f"/api/chats/{session_id}", "PUT", {"title": " "})[0] == 400
+                status, saved = _request(base, f"/api/chats/{session_id}/messages", "POST", {
+                    "question": "What content?",
+                })
+                assert status == 200 and saved["turn_count"] == 1
+                assert saved["title"] == "Hội thoại thử nghiệm"
+                assert [m["role"] for m in saved["messages"]] == ["user", "assistant"]
+                assert saved["messages"][1]["result"]["citations"][0]["viewer_url"].endswith(
+                    f"/api/runs/{'a' * 32}/citations/1/source#page=1"
+                )
+                status, reopened = _request(base, f"/api/chats/{session_id}")
+                assert status == 200 and reopened["messages"] == saved["messages"]
+                status, chats = _request(base, "/api/chats")
+                assert status == 200 and chats["sessions"][0]["turn_count"] == 1
+                status, _ = _request(base, f"/api/chats/{session_id}/messages", "POST", {
+                    "question": "",
+                })
+                assert status == 400
+                assert len(_request(base, f"/api/chats/{session_id}")[1]["messages"]) == 2
+                monkeypatch.setattr(
+                    pipeline, "run_crag",
+                    lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("model unavailable")),
+                )
+                status, failed = _request(base, f"/api/chats/{session_id}/messages", "POST", {
+                    "question": "Another question?",
+                })
+                assert status == 503 and "model unavailable" in failed["error"]
+                assert len(_request(base, f"/api/chats/{session_id}")[1]["messages"]) == 2
+                monkeypatch.setattr(pipeline, "run_crag", lambda *_args, **_kwargs: run)
+
                 abstained = replace(run, answer=GeneratedAnswer(
                     "model_abstained", "Mô hình chưa tạo được đáp án.", "test", (),
                     2, "abstained_with_ready_context",
@@ -115,6 +156,10 @@ def test_local_api_and_document_lifecycle(
                 assert status == 200 and deleted["removed_chunks"] >= 1
                 status, _ = _request(base, f"/api/documents/{doc_id}")
                 assert status == 404
+                status, removed = _request(base, f"/api/chats/{session_id}", "DELETE")
+                assert status == 200 and removed["deleted"] is True
+                assert _request(base, f"/api/chats/{session_id}")[0] == 404
+                assert _request(base, "/api/runs/" + "a" * 32)[0] == 200
             finally:
                 server.shutdown()
                 thread.join(timeout=10)

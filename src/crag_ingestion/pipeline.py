@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 class IngestionPipeline:
     # Bump whenever parsing semantics change so existing documents are rebuilt.
-    PIPELINE_VERSION = "8"
+    PIPELINE_VERSION = "9"
 
     def __init__(
         self,

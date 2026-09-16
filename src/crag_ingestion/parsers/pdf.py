@@ -34,7 +34,7 @@ class PdfParser(DocumentParser):
     @property
     def signature(self) -> str:
         backend = "pdfplumber" if importlib.util.find_spec("pdfplumber") else "pypdf"
-        return f"pdf-v4|backend={backend}|images={int(self.extract_images)}"
+        return f"pdf-v5|backend={backend}|images={int(self.extract_images)}"
 
     def parse(self, path: Path, *, source_path: Path | None = None) -> ParsedDocument:
         try:

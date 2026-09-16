@@ -123,6 +123,19 @@ def test_long_unbroken_text_is_split_without_exceeding_limit_or_losing_offsets()
     assert "".join(text[start:end] for start, end in spans) == text
 
 
+def test_pdf_line_break_does_not_separate_negation_from_predicate() -> None:
+    text = (
+        "Hai ràng buộc: 31 . 0% câu có ngữ cảnh không\n\n"
+        "nhét vừa một cửa sổ 256 token, và 32 . 4% câu là câu bẫy, "
+        "chỉ khác một câu hỏi thật ở\n\nmột chi tiết then chốt đã bị thay. "
+        "Hệ thống phải biết từ chối."
+    )
+    spans = KnowledgeRefiner(FakeStripEvaluator()).split_spans(text)
+    strips = [text[start:end] for start, end in spans]
+    assert any("31 . 0%" in strip and "không\n\nnhét vừa" in strip for strip in strips)
+    assert not any(strip.startswith("nhét vừa") or strip.endswith("31 .") for strip in strips)
+
+
 def test_duplicate_parent_ids_are_rejected() -> None:
     judge = FakeStripEvaluator()
     parent = _parent("same", "Hoàn tiền.", Relevance.RELEVANT)

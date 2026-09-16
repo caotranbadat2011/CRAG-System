@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from .chat import ChatStore
 from .config import IngestionConfig
 from .documents import DocumentManager
 from .exceptions import IngestionError
@@ -24,7 +25,35 @@ class LocalWebService:
     def __init__(self, pipeline: IngestionPipeline) -> None:
         self.pipeline = pipeline
         self.documents = DocumentManager(pipeline)
+        self.chats = ChatStore(pipeline.config.checkpoint_path.parent / "chats.sqlite3")
         self.lock = threading.RLock()
+
+    def list_chats(self) -> list[dict[str, object]]:
+        with self.lock:
+            return self.chats.list()
+
+    def create_chat(self) -> dict[str, object]:
+        with self.lock:
+            return self.chats.create()
+
+    def get_chat(self, session_id: str) -> dict[str, object]:
+        with self.lock:
+            return self.chats.get(session_id)
+
+    def rename_chat(self, session_id: str, data: dict[str, object]) -> dict[str, object]:
+        with self.lock:
+            return self.chats.rename(session_id, data.get("title"))
+
+    def delete_chat(self, session_id: str) -> dict[str, object]:
+        with self.lock:
+            self.chats.delete(session_id)
+        return {"session_id": session_id, "deleted": True}
+
+    def send_chat(self, session_id: str, data: dict[str, object]) -> dict[str, object]:
+        with self.lock:
+            self.chats.get(session_id)
+            result = self.ask(data)
+            return self.chats.append_exchange(session_id, str(data["question"]), result)
 
     def ask(self, data: dict[str, object]) -> dict[str, object]:
         question = data.get("question")
@@ -182,10 +211,35 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
                 return
             path = unquote(urlsplit(self.path).path)
             service = self.server.service
-            if method == "GET" and path in {"/", "/app.js", "/style.css"}:
+            if method == "GET" and path in {"/", "/app.js", "/style.css", "/chat.css"}:
                 name = "index.html" if path == "/" else path.lstrip("/")
                 self._static(name)
                 return
+            if method == "GET" and path == "/api/chats":
+                self._json(200, {"sessions": service.list_chats()})
+                return
+            if method == "POST" and path == "/api/chats":
+                self._require_mutation()
+                self._json(201, service.create_chat())
+                return
+            chat_match = re.fullmatch(r"/api/chats/([0-9a-f]{32})(?:/(messages))?", path)
+            if chat_match:
+                session_id, suffix = chat_match.groups()
+                if method == "GET" and suffix is None:
+                    self._json(200, service.get_chat(session_id))
+                    return
+                if method == "PUT" and suffix is None:
+                    self._require_mutation()
+                    self._json(200, service.rename_chat(session_id, self._read_json()))
+                    return
+                if method == "DELETE" and suffix is None:
+                    self._require_mutation()
+                    self._json(200, service.delete_chat(session_id))
+                    return
+                if method == "POST" and suffix == "messages":
+                    self._require_mutation()
+                    self._json(200, service.send_chat(session_id, self._read_json()))
+                    return
             if method == "GET" and path == "/api/documents":
                 with service.lock:
                     self._json(200, {"documents": service.documents.list_documents()})
@@ -278,6 +332,11 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self._headers("application/json; charset=utf-8", len(body))
+        if status >= 400:
+            # A rejected mutation may leave its request body unread. Do not
+            # reuse that connection for another HTTP request.
+            self.close_connection = True
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
