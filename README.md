@@ -9,7 +9,7 @@
 
 > A source-aware Corrective Retrieval-Augmented Generation (CRAG) system for document question answering, with hybrid retrieval, three-way knowledge correction, and inspectable citations.
 
-CRAG System ingests PDF, DOCX, Markdown, and text files; indexes dense and sparse representations in Qdrant; and answers questions using evidence selected from the indexed documents and, when needed, the web. A retrieval evaluator chooses one of three paths: **Correct**, **Incorrect**, or **Ambiguous**. The result includes the selected evidence and source locations so an answer can be inspected rather than taken on trust.
+CRAG System ingests PDF, DOCX, Markdown, and text files; indexes dense and sparse representations in Qdrant; and answers questions using evidence selected from the indexed documents and, when needed, fetched web pages. A retrieval evaluator chooses one of three paths: **Correct**, **Incorrect**, or **Ambiguous**. Results expose citations and source metadata for inspection; a citation alone does not prove that an answer is correct.
 
 This is a local research/prototype application, **not a production-hardened or benchmark-validated service**. The current checkout uses Gemini for retrieval evaluation, web-query rewriting, and answer generation. Embedding and reranking run locally.
 
@@ -35,23 +35,23 @@ This is a local research/prototype application, **not a production-hardened or b
 
 | Area | Implemented behavior |
 | --- | --- |
-| Document ingestion | PDF, DOCX, Markdown/CommonMark + GFM extensions, and plain text; parsing, cleaning, structural chunks, source metadata, and immutable raw copies |
+| Document ingestion | PDF, DOCX, Markdown (including supported CommonMark/GFM constructs), and plain text; parsing, cleaning, structural chunks, source metadata, and content-addressed raw copies |
 | Hybrid retrieval | BGE-M3 1024-dimensional dense vectors and lexical sparse weights in Qdrant, combined with reciprocal rank fusion (RRF) |
 | Precision | `BAAI/bge-reranker-v2-m3` cross-encoder reranking before evaluation; semantic diversity selection after knowledge refinement |
 | Corrective routing | Gemini judges each candidate as relevant, irrelevant, or uncertain; the validated labels determine Correct, Incorrect, or Ambiguous |
 | Knowledge correction | Internal knowledge strips for Correct; web search for Incorrect; both sources for Ambiguous where available |
 | Grounded answers | Claim-level citation markers validated against selected evidence; explicit partial, insufficient-evidence, and model-abstained states |
-| Traceability | Chunk IDs, page/heading details, source offsets, content hashes, Qdrant payloads, and SQLite run checkpoints |
+| Traceability | Chunk IDs, available page/heading details and offsets, content hashes, Qdrant payloads, and SQLite run checkpoints |
 | Local interface | Built-in loopback HTTP API and browser UI with persistent chat sessions, document management, and citation inspection |
 
 ## Architecture
 
 ![CRAG System architecture: document ingestion into Qdrant, hybrid retrieval, three corrective branches, and cited answer generation](docs/images/crag-architecture.png)
 
-1. **Ingestion:** Parsers retain structure and provenance. Cleaning normalizes text; the chunker applies length limits and overlap. A pipeline signature and source checksum protect against stale indexes.
+1. **Ingestion:** Parsers retain the structure and provenance they can extract. Cleaning normalizes text; the chunker applies length limits and overlap. A pipeline signature and source checksum detect stale indexes.
 2. **Retrieval:** BGE-M3 emits dense embeddings and lexical weights. Qdrant searches both named vectors and fuses the results with RRF. A BGE cross-encoder reranks the candidate chunks.
 3. **Evaluation:** Gemini returns one relevance label and reason per chunk ID. The application checks the response shape, IDs, and labels before routing; it does not treat the model's answer as an unvalidated confidence score.
-4. **Knowledge correction:** Relevant internal chunks become shorter, source-ordered knowledge strips. Incorrect/Ambiguous routes rewrite queries with Gemini, search via DDGS/DuckDuckGo, fetch eligible pages, and filter page passages. Search-result snippets are not accepted as evidence.
+4. **Knowledge correction:** Relevant internal chunks become shorter knowledge strips with parent-chunk IDs and offsets. Incorrect/Ambiguous routes rewrite queries with Gemini, search via DDGS/DuckDuckGo, fetch eligible pages, and filter page passages. Search-result snippets are not accepted as evidence.
 5. **Context and answer:** A diversity filter reduces overlap among strips. Each selected strip receives a citation marker such as `[1]`. Gemini generates atomic claims; unknown or missing citation markers are rejected. LangGraph manages the three branches, and SQLite stores the run state.
 
 The diversity filter runs **after** retrieval evaluation and knowledge refinement. It does not silently change the chunks sent to the retrieval evaluator. For an Ambiguous result, the context assembler attempts to include both internal and web evidence; missing sources yield a `partial` context with a warning.
@@ -70,14 +70,14 @@ The diversity filter runs **after** retrieval evaluation and knowledge refinemen
 | Orchestration and checkpoints | LangGraph + SQLite |
 | UI/API | Python HTTP server + HTML/CSS/JavaScript, bound to `127.0.0.1`; SQLite chat sessions |
 
-Qdrant's embedded mode needs no Docker container for the quick start. The embedding and reranker models are downloaded on first use; plan for their local disk and memory requirements.
+Qdrant's embedded mode needs no Docker container for the quick start, but its storage should be opened by only one application process at a time. Use Qdrant server when running the UI and separate CLI processes concurrently. The embedding and reranker models are downloaded on first use; plan for their local disk and memory requirements.
 
 ## Quick start
 
 ### Prerequisites
 
 - Python 3.11 or newer.
-- Internet access for the initial model downloads and Gemini requests.
+- Internet access for the initial model downloads and Gemini requests, and for questions routed to web search.
 - A Gemini API key for `evaluate`, `refine`, `search-web`, and `run` (retrieval-only `query` and ingestion do not need one).
 
 The commands below use PowerShell from the repository root. Replace the sample PDF path with a file you own; a `documents/` directory is **not** required.
@@ -152,7 +152,7 @@ For example, to scope a question to one indexed document:
 .\.venv\Scripts\python.exe -m crag_ingestion --web-max-pages 3 --context-max-chars 6000 run "Câu hỏi" --limit 3
 ```
 
-The UI/API supports document upload, replacement of UI-managed files, refresh, deletion, persistent chat sessions, question answering, completed-run lookup, and original-source links. Chat routes are `GET/POST /api/chats`, `GET/PUT/DELETE /api/chats/{session_id}` (`PUT` accepts `{"title":"..."}`), and `POST /api/chats/{session_id}/messages`. The existing one-shot `POST /api/ask` remains available. Mutating requests require JSON and `X-CRAG-Local: 1`. The server binds only to loopback and has no user authentication.
+The UI/API supports document upload, replacement of UI-managed files, refresh, deletion, persistent chat sessions, question answering, completed-run lookup, and original-source links. Chat routes are `GET/POST /api/chats`, `GET/PUT/DELETE /api/chats/{session_id}` (`PUT` accepts `{"title":"..."}`), and `POST /api/chats/{session_id}/messages`. The existing one-shot `POST /api/ask` remains available. State-changing requests require `X-CRAG-Local: 1`; routes that accept a request body expect JSON, while `DELETE` needs no JSON body. The server binds only to loopback and has no user authentication.
 
 ### Reading a result
 
@@ -165,35 +165,43 @@ The UI/API supports document upload, replacement of UI-managed files, refresh, d
 ## Project structure
 
 ```text
-src/crag_ingestion/
-  parsers/       PDF, DOCX, Markdown, TXT and parser registry
-  embeddings/    BGE-M3 dense/sparse adapter
-  index/         Qdrant schema, payloads, filters, hybrid search
-  retrieval/     reranking, evaluation, refinement, web search,
-                 diversity selection, context and answer generation
-  cleaning.py    Unicode/whitespace/control-character normalization
-  chunking.py    structure-aware chunks with overlap and provenance
-  storage.py     immutable raw and processed artifact storage
-  documents.py   document upload/update/refresh/delete lifecycle
-  pipeline.py    ingestion and retrieval entry points
-  workflow.py    LangGraph branches and SQLite checkpoints
-  chat.py        persistent chat sessions and message history
-  web.py         loopback HTTP API
-  static/        browser interface
-  validation.py index and provenance checks
-  cli.py         command-line interface
-tests/           parser, retrieval, workflow, API, and lifecycle tests
-data/            runtime state (ignored by Git)
+CRAG-System/
+├── README.md
+├── pyproject.toml              # Package metadata and dependencies
+├── docs/
+│   └── images/
+│       └── crag-architecture.png
+├── src/
+│   └── crag_ingestion/
+│       ├── parsers/             # PDF, DOCX, Markdown, TXT; parser registry
+│       ├── embeddings/          # BGE-M3 dense/sparse adapter
+│       ├── index/               # Qdrant schema, payloads, hybrid search
+│       ├── retrieval/           # Reranking, evaluation, refinement, web,
+│       │                        # diversity, context, answer generation
+│       ├── static/              # Browser HTML, CSS, JavaScript
+│       ├── cleaning.py          # Text normalization
+│       ├── chunking.py          # Structure-aware chunks and provenance
+│       ├── storage.py           # Raw and processed artifact storage
+│       ├── documents.py         # Document upload/refresh/delete lifecycle
+│       ├── pipeline.py          # Ingestion and retrieval entry points
+│       ├── workflow.py          # LangGraph routing and run checkpoints
+│       ├── chat.py              # SQLite chat sessions and messages
+│       ├── web.py               # Loopback HTTP API
+│       ├── validation.py        # Index and provenance checks
+│       └── cli.py               # Command-line interface
+├── tests/                       # Parser, retrieval, workflow, API tests
+└── data/                        # Created at runtime; ignored by Git
 ```
 
 Runtime data is separated by purpose:
 
 ```text
-data/raw/          immutable source copies and extracted media
-data/processed/    parsed blocks, chunks, and metadata
-data/qdrant/       embedded Qdrant collection (when no server URL is set)
-data/checkpoints/  SQLite run history and chats.sqlite3
-data/uploads/      sources uploaded through the browser UI
+data/
+├── raw/            # Content-addressed source copies and extracted media
+├── processed/      # Parsed blocks, chunks, and metadata
+├── qdrant/         # Embedded Qdrant storage (without --qdrant-url)
+├── checkpoints/    # SQLite run history and chats.sqlite3
+└── uploads/        # Sources uploaded through the browser UI
 ```
 
 `documents/` is not a required runtime directory. Do not treat `data/` as disposable cache: it contains indexed vectors, sources, and saved evidence.
@@ -214,13 +222,13 @@ Tests exercise the implemented components, but this repository does **not** yet 
 ## Design decisions and limitations
 
 - **Preserve evidence before summarizing:** Internal strips retain their parent chunk ID, page/heading metadata, and offsets within the indexed chunk. Web strips retain URL, fetched-page details, and offsets. Some parser source ranges cannot be narrowed exactly after overlapping chunks are assembled.
-- **No mid-strip truncation:** The context has bounded strip and character budgets (8 strips / 6,000 characters by default). A strip that cannot fit is omitted with a warning. Diversity defaults to relevance weight `0.6` and duplicate threshold `0.85`.
-- **PDF OCR is not included:** Layout, text, tables, coordinates, and extractable images are handled, but an image-only page is not transcribed. Markdown image OCR is only an injectable hook, not a built-in OCR service.
+- **Bounded context:** Context assembly does not cut a selected strip mid-text: with the default budget of 8 strips / 6,000 characters, a strip that cannot fit is omitted with a warning. Earlier chunking or strip construction can still split long source text. Diversity defaults to relevance weight `0.6` and duplicate threshold `0.85`.
+- **PDF extraction is best-effort, without OCR:** Text, layout, tables, positions, and extractable images are processed where available, but multi-column reading order, table structure, and precise source coordinates are not guaranteed. The `pypdf` fallback may provide only page-level positions. Image-only pages are not transcribed, and extracted images are not interpreted for answers. Markdown image OCR is only an injectable hook, not a built-in service.
 - **External services can fail:** Gemini quotas/model access and DDGS availability affect evaluation and web branches. Failed web retrieval does not make a search snippet trustworthy evidence.
 - **Model judgments can be wrong:** Relevance labels, rewritten queries, and grounded answers still need evaluation against a labeled dataset. Citation-marker validation checks reference integrity, not semantic entailment.
-- **Negation safeguard is narrow:** PDF lines are not treated as sentence boundaries during knowledge refinement, and answer generation retries or omits claims that plainly reverse a negated predicate in their cited strip. This does not prove that every answer is entailed by its citations.
+- **Negation safeguard is narrow:** Line breaks alone are not treated as sentence boundaries during knowledge refinement, and answer generation retries or omits claims that plainly reverse a negated predicate in their cited strip. Paraphrases, translations, and other contradictions may escape this check; citation validation is not proof of entailment.
 - **Chat history is not retrieval memory:** Sessions persist the conversation and citations, but each new question runs through CRAG independently. Pronoun-based follow-ups may need an explicit subject; prior turns are not silently added to retrieval or Gemini prompts.
-- **Local web server only:** The synchronous SQLite checkpoint store and unauthenticated loopback UI are suitable for local testing, not multi-worker public deployment.
+- **Local web server only:** Chat requests run the CRAG workflow synchronously and may keep other local API actions waiting. The SQLite checkpoint store, embedded Qdrant's single-process access, and unauthenticated loopback UI are suitable for local testing, not multi-worker public deployment. The browser currently expects JSON API responses; an HTML error page can surface as a JSON parse error instead of a useful server message.
 
 ## Security and data handling
 
