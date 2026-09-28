@@ -6,7 +6,7 @@ import pytest
 
 from crag_ingestion.config import AnswerConfig
 from crag_ingestion.retrieval.answer import (
-    GeminiAnswerGenerator, MODEL_ABSTAINED, NO_ANSWER, PARTIAL_NOTICE,
+    GeminiAnswerGenerator, MODEL_ABSTAINED, NO_ANSWER, PARTIAL_NOTICE, _corrupted_text,
 )
 from crag_ingestion.retrieval.context import AssembledContext, Citation
 from crag_ingestion.retrieval.diversity import KnowledgeStrip
@@ -262,3 +262,30 @@ def test_answer_rejects_persistently_corrupted_unicode() -> None:
     )
     with pytest.raises(ValueError, match="corrupted Unicode"):
         generator.generate("Thủ đô Nhật Bản?", _context())
+
+
+@pytest.mark.parametrize("text", ["Châu Âu", "Âm thanh", "MÃ NGUỒN", "Â", "Ã", "São Paulo"])
+def test_valid_accented_letters_are_not_corrupted(text: str) -> None:
+    assert not _corrupted_text(text)
+
+
+@pytest.mark.parametrize("text", ["FranÃ§ais", "cafÃ©", "Â\u00a0", "â€™", "m´ tả", "bad\ufffd"])
+def test_mojibake_sequences_are_still_detected(text: str) -> None:
+    assert _corrupted_text(text)
+
+
+def test_answer_accepts_chau_au_without_spurious_retry() -> None:
+    calls = []
+    source = "Châu Âu sử dụng hệ thống xử lý âm thanh."
+    strip = KnowledgeStrip("s1", source, "internal", "chunk-1", {})
+    citation = Citation("[1]", "s1", "internal", "chunk-1", {})
+    context = AssembledContext("ready", json.dumps({"citation": "[1]", "text": source}), (strip,), (citation,), ())
+
+    def transport(payload: dict[str, object], _key: str) -> dict[str, object]:
+        calls.append(payload)
+        return _response(True, [{"text": source, "citations": ["[1]"]}])
+
+    answer = GeminiAnswerGenerator(api_key="test-key", transport=transport).generate("Ở đâu?", context)
+    assert len(calls) == answer.attempts == 1
+    assert answer.retry_reason is None
+    assert answer.text == source + " [1]"

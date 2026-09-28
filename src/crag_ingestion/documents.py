@@ -39,7 +39,14 @@ class DocumentManager:
             result = self.pipeline.ingest_file(source)
             return result.to_dict()
         except Exception:
-            shutil.rmtree(directory)
+            # An interrupted Qdrant update may still need this source for
+            # recovery. Remove it only when no indexed/pending record exists.
+            try:
+                indexed = self.pipeline.index.get_document(stable_document_id(source))
+            except Exception:
+                indexed = True  # Preserve the source if index state is unknown.
+            if indexed is None:
+                shutil.rmtree(directory)
             raise
 
     def update_upload(self, document_id: str, filename: str, content: bytes) -> dict[str, Any]:
@@ -59,12 +66,12 @@ class DocumentManager:
             result = self.pipeline.ingest_file(source, force=True)
             if result.document_id != document_id:
                 raise RuntimeError("Document ID changed during replacement")
-            return result.to_dict()
         except Exception:
             os.replace(backup, source)
             raise
-        finally:
-            backup.unlink(missing_ok=True)
+        # If restoring the backup itself fails, keep it for recovery.
+        backup.unlink(missing_ok=True)
+        return result.to_dict()
 
     def refresh(self, document_id: str) -> dict[str, Any]:
         document = self.get_document(document_id)

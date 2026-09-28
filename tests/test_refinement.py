@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from crag_ingestion.config import IngestionConfig, RefinementConfig
+from crag_ingestion.chunking import StructuralChunker
+from crag_ingestion.config import ChunkingConfig, IngestionConfig, RefinementConfig
 from crag_ingestion.embeddings.base import Embedder
-from crag_ingestion.models import Chunk, SearchResult
+from crag_ingestion.models import Chunk, ParsedDocument, SearchResult, TextBlock
 from crag_ingestion.pipeline import IngestionPipeline
 from crag_ingestion.retrieval import (
     CorrectiveAction, EvaluatedHit, EvaluationDecision, KnowledgeRefiner,
@@ -48,6 +49,41 @@ class FakeStripEvaluator:
             for hit in hits
         )
         return EvaluationDecision(CorrectiveAction.CORRECT, "fake/strip", judged)
+
+
+def test_refinement_narrows_overlap_citations_to_actual_page() -> None:
+    document = ParsedDocument(Path("pages.pdf"), "application/pdf", [
+        TextBlock("Page one content. " * 6, page=1, heading_path=("First",), ordinal=0,
+                  metadata={"source": {"page": 1}}),
+        TextBlock("Page two content. " * 4, page=2, heading_path=("Second",), ordinal=1,
+                  metadata={"source": {"page": 2}}),
+    ])
+    chunk = StructuralChunker(ChunkingConfig(120, 30, 0)).chunk("doc", document)[1]
+
+    class KeepAll:
+        def evaluate(self, query: str, hits: list[RerankedHit]) -> EvaluationDecision:
+            return EvaluationDecision(CorrectiveAction.CORRECT, "fake", tuple(
+                EvaluatedHit(hit, Relevance.RELEVANT, "Relevant") for hit in hits
+            ))
+
+    parent = EvaluatedHit(RerankedHit(SearchResult(1, chunk, "/pages.pdf", "/raw.pdf"), 1), Relevance.RELEVANT, "Relevant")
+    strips = KnowledgeRefiner(KeepAll(), RefinementConfig(80, 1, 12)).refine_internal(
+        "content", EvaluationDecision(CorrectiveAction.CORRECT, "fake", (parent,)),
+    )
+    assert any(strip.metadata["pages"] == [1] for strip in strips)
+    assert any(strip.metadata["pages"] == [2] for strip in strips)
+    for strip in strips:
+        assert strip.metadata["chunk_id"] == chunk.chunk_id
+        if "Page two" in strip.text:
+            assert strip.metadata["pages"] == [2]
+            assert strip.metadata["heading_path"] == ["Second"]
+            assert not strip.metadata["has_overlap"]
+        else:
+            assert strip.metadata["pages"] == [1]
+            assert strip.metadata["has_overlap"]
+        for span in strip.metadata["source_spans"]:
+            block = document.blocks[span["block_ordinal"]]
+            assert strip.text[span["strip_char_start"]:span["strip_char_end"]] == block.text[span["block_char_start"]:span["block_char_end"]]
 
 
 def test_correct_refines_only_relevant_parent_and_retains_exact_chunk_offsets() -> None:

@@ -205,6 +205,7 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
     def _dispatch(self, method: str) -> None:
+        self._body_read = False
         try:
             if not self._allowed_host():
                 self._json(403, {"error": "Request host is not local"})
@@ -220,6 +221,7 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and path == "/api/chats":
                 self._require_mutation()
+                self._read_json(optional=True)
                 self._json(201, service.create_chat())
                 return
             chat_match = re.fullmatch(r"/api/chats/([0-9a-f]{32})(?:/(messages))?", path)
@@ -234,6 +236,7 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
                     return
                 if method == "DELETE" and suffix is None:
                     self._require_mutation()
+                    self._read_json(optional=True)
                     self._json(200, service.delete_chat(session_id))
                     return
                 if method == "POST" and suffix == "messages":
@@ -258,6 +261,7 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
                     return
                 if method == "POST" and suffix == "refresh":
                     self._require_mutation()
+                    self._read_json(optional=True)
                     self._json(200, service.refresh(document_id))
                     return
                 if method == "PUT" and suffix is None:
@@ -266,6 +270,7 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
                     return
                 if method == "DELETE" and suffix is None:
                     self._require_mutation()
+                    self._read_json(optional=True)
                     self._json(200, service.delete(document_id))
                     return
             if method == "POST" and path == "/api/documents":
@@ -313,15 +318,27 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
         if self.headers.get("X-CRAG-Local") != "1":
             raise ValueError("Missing local request header")
 
-    def _read_json(self) -> dict[str, object]:
+    def _read_json(self, *, optional: bool = False) -> dict[str, object]:
+        if self.headers.get("Transfer-Encoding"):
+            raise ValueError("Transfer-Encoding is not supported; send Content-Length")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) > 1:
+            raise ValueError("Duplicate Content-Length headers are not allowed")
+        length = self.headers.get("Content-Length")
+        if optional and length in (None, "0"):
+            self._body_read = True
+            return {}
         if self.headers.get_content_type() != "application/json":
             raise ValueError("Content-Type must be application/json")
-        length = self.headers.get("Content-Length")
         maximum = (self.server.service.pipeline.config.max_file_bytes * 4 // 3) + 100_000
         if not length or not length.isdigit() or not 0 < int(length) <= maximum:
             raise ValueError("Request body is empty or too large")
         try:
-            value = json.loads(self.rfile.read(int(length)))
+            raw = self.rfile.read(int(length))
+            if len(raw) != int(length):
+                raise ValueError("Request body is incomplete")
+            self._body_read = True
+            value = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise ValueError("Request body must be valid JSON") from None
         if not isinstance(value, dict):
@@ -331,12 +348,11 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
     def _json(self, status: int, payload: dict[str, object]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
-        self._headers("application/json; charset=utf-8", len(body))
         if status >= 400:
             # A rejected mutation may leave its request body unread. Do not
             # reuse that connection for another HTTP request.
             self.close_connection = True
-            self.send_header("Connection", "close")
+        self._headers("application/json; charset=utf-8", len(body))
         self.end_headers()
         self.wfile.write(body)
 
@@ -365,6 +381,14 @@ class CRAGRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(block)
 
     def _headers(self, content_type: str, length: int) -> None:
+        # Even a successful route must not reuse a socket with an unread body.
+        if self.headers.get("Transfer-Encoding") or (
+            self.headers.get("Content-Length") not in (None, "0")
+            and not getattr(self, "_body_read", False)
+        ):
+            self.close_connection = True
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Cache-Control", "no-store")

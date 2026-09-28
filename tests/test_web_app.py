@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import threading
 from dataclasses import replace
@@ -168,6 +169,46 @@ def test_local_api_and_document_lifecycle(
 def test_server_rejects_nonlocal_bind() -> None:
     with pytest.raises(ValueError, match="localhost"):
         CRAGHTTPServer(("0.0.0.0", 0), None)  # type: ignore[arg-type]
+
+
+def test_chat_requests_consume_bodies_on_persistent_connection(tmp_path: Path, fake_embedder: object) -> None:
+    with IngestionPipeline(IngestionConfig(data_dir=tmp_path / "data"), embedder=fake_embedder) as pipeline:
+        with CRAGHTTPServer(("127.0.0.1", 0), LocalWebService(pipeline)) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            headers = {"Content-Type": "application/json", "X-CRAG-Local": "1"}
+            try:
+                conn.request("POST", "/api/chats", body="{}", headers=headers)
+                response = conn.getresponse()
+                assert response.status == 201
+                session = json.loads(response.read())
+                socket = conn.sock
+                conn.request("GET", "/api/chats")
+                response = conn.getresponse()
+                assert response.status == 200
+                assert json.loads(response.read())["sessions"][0]["session_id"] == session["session_id"]
+                assert conn.sock is socket
+                conn.request("DELETE", f"/api/chats/{session['session_id']}", body="{}", headers=headers)
+                response = conn.getresponse()
+                assert response.status == 200
+                response.read()
+                conn.request("GET", "/api/chats")
+                response = conn.getresponse()
+                assert response.status == 200
+                assert json.loads(response.read()) == {"sessions": []}
+                assert conn.sock is socket
+                # Invalid JSON must not create a session or poison a reused socket.
+                conn.request("POST", "/api/chats", body="{bad", headers=headers)
+                response = conn.getresponse()
+                assert response.status == 400
+                assert response.getheader("Connection") == "close"
+                response.read()
+                assert server.service.list_chats() == []
+            finally:
+                conn.close()
+                server.shutdown()
+                thread.join(timeout=5)
 
 
 def test_web_lists_stale_documents_and_blocks_ask_before_model_calls(

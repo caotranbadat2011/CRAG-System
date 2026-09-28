@@ -41,7 +41,7 @@ This is a local research/prototype application, **not a production-hardened or b
 | Corrective routing | Gemini judges each candidate as relevant, irrelevant, or uncertain; the validated labels determine Correct, Incorrect, or Ambiguous |
 | Knowledge correction | Internal knowledge strips for Correct; web search for Incorrect; both sources for Ambiguous where available |
 | Grounded answers | Claim-level citation markers validated against selected evidence; explicit partial, insufficient-evidence, and model-abstained states |
-| Traceability | Chunk IDs, available page/heading details and offsets, content hashes, Qdrant payloads, and SQLite run checkpoints |
+| Traceability | Chunk IDs, per-span page/heading provenance including overlap, offsets into cleaned blocks, content hashes, Qdrant payloads, and SQLite run checkpoints |
 | Local interface | Built-in loopback HTTP API and browser UI with persistent chat sessions, document management, and citation inspection |
 
 ## Architecture
@@ -213,22 +213,30 @@ data/
 .\.venv\Scripts\python.exe -m pytest
 ```
 
+With Node.js 18+ available, run the browser response-handling tests too:
+
+```powershell
+node --test tests/test_web_client.cjs
+```
+
 `validate` checks the Qdrant vector schema and dimensions, dense norms, sparse weights, document/chunk counts, stored artifacts, hashes, and provenance including PDF page references. Retrieval separately checks the source checksum and pipeline signature. If parsing, chunking, cleaning, or embedding semantics change, the affected documents must be refreshed or re-ingested; the system blocks queries against stale evidence instead of silently using it.
 
-After updating from a version with the older PDF layout/refinement logic, restart `serve` and use the document **Refresh** action (or rerun `ingest PATH --force`) before asking the same question again. Saved chat answers are historical snapshots and are not rewritten by re-indexing.
+Index updates snapshot the previous chunks and vectors and persist an update marker before changing Qdrant. On failure, the application attempts rollback. An interrupted update or failed rollback is shown as `incomplete_update` and blocks queries involving that document until a refresh/re-ingest completes (or the document is removed). Processed artifacts are versioned by their content so a failed refresh does not overwrite the previous artifact. These safeguards support the local application's serialized operations; they are not a distributed transaction or multi-writer lock for a shared Qdrant server.
+
+After updating from a version with the older PDF layout/refinement or overlap provenance logic, restart `serve` and use the document **Refresh** action (or rerun `ingest PATH --force`) before asking the same question again. Pipeline version 10 rebuilds the source-span mappings used to narrow strip citations to their actual pages. Saved chat answers are historical snapshots and are not rewritten by re-indexing.
 
 Tests exercise the implemented components, but this repository does **not** yet publish a labeled QA benchmark or measured answer-accuracy, latency, or throughput results. The evaluator's labels are not calibrated probabilities and are not a reproduction of the original CRAG paper's trained evaluator.
 
 ## Design decisions and limitations
 
-- **Preserve evidence before summarizing:** Internal strips retain their parent chunk ID, page/heading metadata, and offsets within the indexed chunk. Web strips retain URL, fetched-page details, and offsets. Some parser source ranges cannot be narrowed exactly after overlapping chunks are assembled.
+- **Preserve evidence before summarizing:** Internal strips retain their parent chunk ID and intersecting source spans, including the original pages/headings of overlap text. Character offsets address the indexed chunk and cleaned source blocks; parser source ranges and PDF bounding boxes can remain block-level rather than character-exact. Web strips retain URL, fetched-page details, and offsets.
 - **Bounded context:** Context assembly does not cut a selected strip mid-text: with the default budget of 8 strips / 6,000 characters, a strip that cannot fit is omitted with a warning. Earlier chunking or strip construction can still split long source text. Diversity defaults to relevance weight `0.6` and duplicate threshold `0.85`.
 - **PDF extraction is best-effort, without OCR:** Text, layout, tables, positions, and extractable images are processed where available, but multi-column reading order, table structure, and precise source coordinates are not guaranteed. The `pypdf` fallback may provide only page-level positions. Image-only pages are not transcribed, and extracted images are not interpreted for answers. Markdown image OCR is only an injectable hook, not a built-in service.
 - **External services can fail:** Gemini quotas/model access and DDGS availability affect evaluation and web branches. Failed web retrieval does not make a search snippet trustworthy evidence.
 - **Model judgments can be wrong:** Relevance labels, rewritten queries, and grounded answers still need evaluation against a labeled dataset. Citation-marker validation checks reference integrity, not semantic entailment.
 - **Negation safeguard is narrow:** Line breaks alone are not treated as sentence boundaries during knowledge refinement, and answer generation retries or omits claims that plainly reverse a negated predicate in their cited strip. Paraphrases, translations, and other contradictions may escape this check; citation validation is not proof of entailment.
 - **Chat history is not retrieval memory:** Sessions persist the conversation and citations, but each new question runs through CRAG independently. Pronoun-based follow-ups may need an explicit subject; prior turns are not silently added to retrieval or Gemini prompts.
-- **Local web server only:** Chat requests run the CRAG workflow synchronously and may keep other local API actions waiting. The SQLite checkpoint store, embedded Qdrant's single-process access, and unauthenticated loopback UI are suitable for local testing, not multi-worker public deployment. The browser currently expects JSON API responses; an HTML error page can surface as a JSON parse error instead of a useful server message.
+- **Local web server only:** Chat requests run the CRAG workflow synchronously and may keep other local API actions waiting. The SQLite checkpoint store, embedded Qdrant's single-process access, and unauthenticated loopback UI are suitable for local testing, not multi-worker public deployment. The browser reports unexpected response types and invalid JSON with the HTTP status; server logs may still be needed to diagnose an upstream error.
 
 ## Security and data handling
 

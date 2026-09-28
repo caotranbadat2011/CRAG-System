@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import tempfile
@@ -8,7 +9,7 @@ import re
 from pathlib import Path
 
 from .models import Chunk, ParsedDocument
-from .utils import sha256_file
+from .utils import canonical_json, sha256_file
 
 
 class ArtifactStore:
@@ -42,7 +43,6 @@ class ArtifactStore:
     ) -> Path:
         directory = self.processed_dir / document_id
         directory.mkdir(parents=True, exist_ok=True)
-        destination = directory / f"{content_hash}.json"
         payload = {
             "schema_version": 1,
             "document_id": document_id,
@@ -55,6 +55,10 @@ class ArtifactStore:
             "blocks": [block.to_dict() for block in document.blocks],
             "chunks": [chunk.to_dict() for chunk in chunks],
         }
+        # Keep the old index's artifact intact if a parser refresh or a Qdrant
+        # update fails. Source bytes alone do not identify processed content.
+        revision = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+        destination = directory / f"{content_hash}-{revision}.json"
         fd, temporary_name = tempfile.mkstemp(
             prefix="processed-", suffix=".json", dir=directory
         )

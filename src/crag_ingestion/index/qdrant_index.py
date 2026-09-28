@@ -4,12 +4,13 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from uuid import UUID
+from uuid import UUID, NAMESPACE_URL, uuid5
 
 from qdrant_client import QdrantClient, models
 
 from ..config import DEFAULT_QDRANT_COLLECTION
 from ..embeddings.base import EmbeddingVector
+from ..exceptions import StaleIndexError
 from ..models import Chunk, SearchResult
 
 
@@ -131,6 +132,7 @@ class QdrantVectorIndex:
         document = self.get_document(document_id)
         return bool(
             document
+            and not document.get("index_incomplete")
             and document["content_hash"] == content_hash
             and document["pipeline_signature"] == pipeline_signature
         )
@@ -138,12 +140,16 @@ class QdrantVectorIndex:
     def get_document(self, document_id: str) -> dict[str, Any] | None:
         if not self.collection_exists():
             return None
-        records, _ = self._scroll(
-            self._filter(document_id=document_id), limit=1, with_vectors=False
-        )
+        pending = list(self._scroll_all(
+            self._filter(document_id=document_id, record_type="document_update"),
+            with_vectors=False,
+        ))
+        if pending:
+            return {**self._document_from_payload(pending[0].payload or {}), "index_incomplete": True}
+        records = list(self._scroll_all(self._filter(document_id=document_id), with_vectors=False))
         if not records:
             return None
-        return self._document_from_payload(records[0].payload or {})
+        return self._document_from_records(records)
 
     def replace_document(
         self,
@@ -163,6 +169,12 @@ class QdrantVectorIndex:
         chunks: list[Chunk],
         vectors: list[EmbeddingVector],
     ) -> None:
+        if not chunks or any(chunk.document_id != document_id for chunk in chunks):
+            raise ValueError("A document must have nonempty chunks belonging to its document ID")
+        if len({chunk.chunk_id for chunk in chunks}) != len(chunks):
+            raise ValueError("Document chunk IDs must be unique")
+        if sorted(chunk.ordinal for chunk in chunks) != list(range(len(chunks))):
+            raise ValueError("Document chunk ordinals must be contiguous")
         if len(chunks) != len(vectors):
             raise ValueError("Every chunk must have exactly one vector")
         if any(len(vector.dense) != embedding_dimensions for vector in vectors):
@@ -175,8 +187,16 @@ class QdrantVectorIndex:
         sparse_vectors = [self._sparse_vector(vector) for vector in vectors]
         self.ensure_collection(embedding_dimensions)
 
-        existing_ids = self._point_ids(self._filter(source_path=source_path))
-        existing_ids.update(self._point_ids(self._filter(document_id=document_id)))
+        # Snapshot vectors as well as payloads: an unchanged chunk ID may be
+        # overwritten during refresh, so deleting only new IDs is not rollback.
+        existing = {
+            record.id: record
+            for query_filter in (self._filter(source_path=source_path), self._filter(document_id=document_id))
+            for record in self._scroll_all(query_filter, with_vectors=True)
+        }
+        existing_ids = set(existing)
+        old_document = self.get_document(document_id)
+        was_incomplete = bool(old_document and old_document.get("index_incomplete"))
         ingested_at = datetime.now(timezone.utc).isoformat()
         document_payload: dict[str, Any] = {
             "record_type": "chunk",
@@ -197,7 +217,7 @@ class QdrantVectorIndex:
         }
         points = [
             models.PointStruct(
-                id=UUID(hex=chunk.chunk_id),
+                id=str(UUID(hex=chunk.chunk_id)),
                 vector={"dense": vector.dense, "sparse": sparse},
                 payload={
                     **document_payload,
@@ -212,19 +232,38 @@ class QdrantVectorIndex:
             )
             for chunk, vector, sparse in zip(chunks, vectors, sparse_vectors, strict=True)
         ]
-        self.client.upsert(
-            collection_name=self.collection_name,
-            points=points,
-            wait=True,
+        snapshot = [models.PointStruct(
+            id=record.id, vector=record.vector or {}, payload=record.payload or {},
+        ) for record in existing.values()]
+        marker = models.PointStruct(
+            id=self._update_id(document_id), vector={},
+            payload={**document_payload, "record_type": "document_update"},
         )
+        # The durable marker is acknowledged before any chunk is changed.
+        # A crash or unsuccessful rollback leaves it behind and blocks reads
+        # until a complete refresh succeeds; no mixed revision is served.
+        self.client.upsert(collection_name=self.collection_name, points=[marker], wait=True)
         new_ids = {point.id for point in points}
-        stale_ids = list(existing_ids - new_ids)
-        if stale_ids:
-            self.client.delete(
-                collection_name=self.collection_name,
-                points_selector=models.PointIdsList(points=stale_ids),
-                wait=True,
-            )
+        try:
+            self.client.upsert(collection_name=self.collection_name, points=points, wait=True)
+            self._delete_ids(existing_ids - new_ids)
+            self._delete_ids({marker.id})
+        except Exception as error:
+            try:
+                # A timed-out commit may already have removed the marker.
+                self.client.upsert(collection_name=self.collection_name, points=[marker], wait=True)
+                if snapshot:
+                    self.client.upsert(collection_name=self.collection_name, points=snapshot, wait=True)
+                self._delete_ids(new_ids - existing_ids)
+                if not was_incomplete:
+                    self._delete_ids({marker.id})
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    f"Document {document_id} update failed and rollback is incomplete; "
+                    "refresh/re-ingest this document before querying. "
+                    f"Recovery error: {type(rollback_error).__name__}"
+                ) from error
+            raise
 
     def search(
         self,
@@ -237,6 +276,9 @@ class QdrantVectorIndex:
         if (limit <= 0 or not any(query_vector.dense) or not query_vector.lexical_weights
                 or not self.collection_exists()):
             return []
+        documents = [self.get_document(document_id)] if document_id is not None else self.documents()
+        if any(document and document.get("index_incomplete") for document in documents):
+            raise StaleIndexError("Index update is incomplete; refresh/re-ingest the affected document before querying")
         schema = self.collection_schema()
         if not schema["hybrid_vectors"]:
             raise ValueError("Qdrant collection does not have dense and sparse named vectors")
@@ -288,12 +330,18 @@ class QdrantVectorIndex:
     def documents(self) -> list[dict[str, Any]]:
         if not self.collection_exists():
             return []
-        documents: dict[str, dict[str, Any]] = {}
+        grouped: dict[str, list[Any]] = {}
         for record in self._scroll_all(self._filter(), with_vectors=False):
             payload = record.payload or {}
             document_id = payload.get("document_id")
-            if isinstance(document_id, str) and document_id not in documents:
-                documents[document_id] = self._document_from_payload(payload)
+            if isinstance(document_id, str):
+                grouped.setdefault(document_id, []).append(record)
+        documents = {document_id: self._document_from_records(records) for document_id, records in grouped.items()}
+        for record in self._scroll_all(self._filter(record_type="document_update"), with_vectors=False):
+            payload = record.payload or {}
+            documents[payload["document_id"]] = {
+                **self._document_from_payload(payload), "index_incomplete": True,
+            }
         return sorted(
             documents.values(),
             key=lambda value: (str(value["ingested_at"]), str(value["document_id"])),
@@ -334,7 +382,34 @@ class QdrantVectorIndex:
                 ),
                 wait=True,
             )
+        self._delete_ids({self._update_id(document_id)})
         return count
+
+    @staticmethod
+    def _update_id(document_id: str) -> str:
+        return str(uuid5(NAMESPACE_URL, f"crag:document-update:{document_id}"))
+
+    def _delete_ids(self, ids: set[int | str | UUID]) -> None:
+        if ids:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.PointIdsList(points=list(ids)), wait=True,
+            )
+
+    @classmethod
+    def _document_from_records(cls, records: list[Any]) -> dict[str, Any]:
+        document = cls._document_from_payload(records[0].payload or {})
+        # Also reject partial/mixed indexes left by older versions without a
+        # durable update marker. is_current must never skip their repair.
+        ordinals = [record.payload.get("ordinal") for record in records]
+        if (
+            len(records) != document["chunk_count"]
+            or any(type(ordinal) is not int for ordinal in ordinals)
+            or sorted(ordinals) != list(range(len(records)))
+            or any(cls._document_from_payload(record.payload or {}) != document for record in records)
+        ):
+            document["index_incomplete"] = True
+        return document
 
     def diagnostic_rows(self) -> Iterable[dict[str, Any]]:
         if not self.collection_exists():
@@ -389,10 +464,11 @@ class QdrantVectorIndex:
         source_path: str | None = None,
         embedding_model: str | None = None,
         pipeline_signature: str | None = None,
+        record_type: str = "chunk",
     ) -> models.Filter:
         conditions: list[models.FieldCondition] = [
             models.FieldCondition(
-                key="record_type", match=models.MatchValue(value="chunk")
+                key="record_type", match=models.MatchValue(value=record_type)
             )
         ]
         for key, value in (

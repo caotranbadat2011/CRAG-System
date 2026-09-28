@@ -260,7 +260,16 @@ class GeminiAnswerGenerator:
 
 
 def _corrupted_text(value: str) -> bool:
-    return any(symbol in value for symbol in ("\ufffd", "\u00b4", "Ã", "Â", "â€", "ΓÇ"))
+    # Â/Ã are legitimate letters (e.g. "Châu Âu", "MÃ NGUỒN"). Only
+    # flag them when followed by a decoded UTF-8 continuation byte.
+    return bool(_MOJIBAKE.search(value)) or any(
+        symbol in value for symbol in ("\ufffd", "â€", "ΓÇ")
+    ) or bool(re.search(r"\w\u00b4(?=\s|$)", value))
+
+
+_MOJIBAKE = re.compile(
+    r"[ÃÂ][\u0080-\u00bf€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ]"
+)
 
 
 _NEGATIONS = {"không", "chưa", "not", "never", "no"}

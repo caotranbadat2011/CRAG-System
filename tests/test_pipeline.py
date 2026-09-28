@@ -186,3 +186,28 @@ def test_markdown_asset_resolution_survives_raw_copy_and_validates(
         assert image_block["metadata"]["image"]["resolved_path"] == str(image.resolve())
         assert image_block["metadata"]["image"]["exists"] is True
         assert pipeline.validate().valid
+def test_failed_parser_refresh_preserves_old_processed_artifact(tmp_path: Path, fake_embedder: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("Evidence remains unchanged but parser semantics are upgraded.", encoding="utf-8")
+    with IngestionPipeline(IngestionConfig(data_dir=tmp_path / "data"), embedder=fake_embedder) as pipeline:
+        result = pipeline.ingest_file(source)
+        original_document = pipeline.index.get_document(result.document_id)
+        original_path = Path(original_document["processed_path"])
+        original_bytes = original_path.read_bytes()
+        monkeypatch.setattr(pipeline, "PIPELINE_VERSION", "changed-for-failure-test")
+        upsert = pipeline.index.client.upsert
+        failed = False
+
+        def fail_chunk_once(*a: object, **kw: object) -> object:
+            nonlocal failed
+            if kw["points"][0].payload["record_type"] == "chunk" and not failed:
+                failed = True
+                raise RuntimeError("upsert unavailable")
+            return upsert(*a, **kw)
+
+        monkeypatch.setattr(pipeline.index.client, "upsert", fail_chunk_once)
+        with pytest.raises(RuntimeError, match="upsert unavailable"):
+            pipeline.ingest_file(source, force=True)
+        assert original_path.read_bytes() == original_bytes
+        assert pipeline.index.get_document(result.document_id) == original_document
+        assert pipeline.validate().valid

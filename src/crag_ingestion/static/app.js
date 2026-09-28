@@ -5,8 +5,17 @@ const localHeaders = {"Content-Type": "application/json", "X-CRAG-Local": "1"};
 
 async function request(path, options = {}) {
   const response = await fetch(path, options);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  const contentType = response.headers.get("Content-Type") || "";
+  if (!/^application\/(?:[\w.-]+\+)?json(?:\s*;|$)/i.test(contentType)) {
+    throw new Error(`HTTP ${response.status}: máy chủ trả về phản hồi không phải JSON. Hãy kiểm tra terminal của server.`);
+  }
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error(`HTTP ${response.status}: phản hồi JSON bị lỗi hoặc chưa đầy đủ.`);
+  }
+  if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
   return data;
 }
 

@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 class IngestionPipeline:
     # Bump whenever parsing semantics change so existing documents are rebuilt.
-    PIPELINE_VERSION = "9"
+    PIPELINE_VERSION = "10"
 
     def __init__(
         self,
@@ -173,6 +173,8 @@ class IngestionPipeline:
 
     def document_index_status(self, document: dict[str, object]) -> str:
         """Check indexed provenance without mutating the source or Qdrant."""
+        if document.get("index_incomplete"):
+            return "incomplete_update"
         if document.get("pipeline_signature") != self.pipeline_signature:
             return "outdated_pipeline"
         source_value = document.get("source_path")

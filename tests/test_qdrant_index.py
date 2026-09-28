@@ -6,8 +6,10 @@ import pytest
 from qdrant_client import models
 
 from crag_ingestion.embeddings.base import EmbeddingVector
+from crag_ingestion.exceptions import StaleIndexError
 from crag_ingestion.index import QdrantVectorIndex
 from crag_ingestion.models import Chunk
+from crag_ingestion.validation import validate_index
 
 
 def _chunk(chunk_id: str, document_id: str, ordinal: int, text: str) -> Chunk:
@@ -180,3 +182,114 @@ def test_hybrid_search_fuses_dense_and_lexical_candidates(
             document_id="sparse-doc", limit=2,
         )
         assert [hit.chunk.document_id for hit in filtered] == ["sparse-doc"]
+
+
+def test_failed_delete_restores_original_points_and_vectors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with QdrantVectorIndex(path=tmp_path / "qdrant") as index:
+        args = dict(document_id="doc", source_path="/source.txt", vector=EmbeddingVector([1.0, 0.0], {10: 1.0}))
+        _replace(index, chunk=_chunk("1" * 32, "doc", 0, "old evidence"), **args)
+        original = index.document_chunks("doc")
+        original_delete = index.client.delete
+        calls = 0
+
+        def fail_once(*a: object, **kw: object) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("transient delete failure")
+            return original_delete(*a, **kw)
+
+        monkeypatch.setattr(index.client, "delete", fail_once)
+        with pytest.raises(RuntimeError, match="transient delete failure"):
+            _replace(index, chunk=_chunk("2" * 32, "doc", 0, "new evidence"), **args)
+        assert index.document_chunks("doc") == original
+        assert index.is_current("doc", "content-hash", "pipeline-signature")
+        assert [hit.chunk.text for hit in index.search(args["vector"])] == ["old evidence"]
+        assert index.collection_schema()["points_count"] == 1
+
+
+def test_upsert_applied_then_raised_restores_overwritten_chunk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with QdrantVectorIndex(path=tmp_path / "qdrant") as index:
+        args = dict(document_id="doc", source_path="/source.txt", chunk=_chunk("1" * 32, "doc", 0, "same text"))
+        _replace(index, vector=EmbeddingVector([1.0, 0.0], {10: 1.0}), **args)
+        original = index.document_chunks("doc")
+        upsert = index.client.upsert
+        failed = False
+
+        def apply_then_fail(*a: object, **kw: object) -> object:
+            nonlocal failed
+            result = upsert(*a, **kw)
+            if kw["points"][0].payload["record_type"] == "chunk" and not failed:
+                failed = True
+                raise RuntimeError("lost acknowledgement")
+            return result
+
+        monkeypatch.setattr(index.client, "upsert", apply_then_fail)
+        with pytest.raises(RuntimeError, match="lost acknowledgement"):
+            _replace(index, vector=EmbeddingVector([0.0, 1.0], {20: 2.0}), **args)
+        assert index.document_chunks("doc") == original
+        assert index.collection_schema()["points_count"] == 1
+
+
+def test_incomplete_rollback_blocks_reads_after_restart_and_can_be_refreshed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "qdrant"
+    args = dict(document_id="doc", source_path="/source.txt", vector=EmbeddingVector([1.0, 0.0], {10: 1.0}))
+    with QdrantVectorIndex(path=path) as index:
+        _replace(index, chunk=_chunk("1" * 32, "doc", 0, "old evidence"), **args)
+        with monkeypatch.context() as patch:
+            def fail_delete(*a: object, **kw: object) -> object:
+                raise RuntimeError("storage unavailable")
+            patch.setattr(index.client, "delete", fail_delete)
+            with pytest.raises(RuntimeError, match="rollback is incomplete"):
+                _replace(index, chunk=_chunk("2" * 32, "doc", 0, "new evidence"), **args)
+    with QdrantVectorIndex(path=path) as reopened:
+        assert reopened.get_document("doc")["index_incomplete"]
+        assert not reopened.is_current("doc", "content-hash", "pipeline-signature")
+        with pytest.raises(StaleIndexError):
+            reopened.search(args["vector"])
+        with pytest.raises(StaleIndexError):
+            reopened.search(args["vector"], document_id="doc")
+        report = validate_index(reopened, check_files=False)
+        assert not report.valid
+        assert any(issue.code == "incomplete_update" for issue in report.issues)
+        _replace(reopened, chunk=_chunk("3" * 32, "doc", 0, "recovered evidence"), **args)
+        assert not reopened.get_document("doc").get("index_incomplete")
+        assert [hit.chunk.text for hit in reopened.search(args["vector"])] == ["recovered evidence"]
+        assert reopened.collection_schema()["points_count"] == 1
+
+
+def test_interrupted_first_ingest_is_visible_and_deletable_after_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "qdrant"
+    with QdrantVectorIndex(path=path) as index:
+        upsert = index.client.upsert
+
+        def interrupted(*a: object, **kw: object) -> object:
+            if kw["points"][0].payload["record_type"] == "chunk":
+                raise KeyboardInterrupt("interrupted before chunks")
+            return upsert(*a, **kw)
+
+        monkeypatch.setattr(index.client, "upsert", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            _replace(index, document_id="doc", source_path="/source.txt",
+                     chunk=_chunk("1" * 32, "doc", 0, "text"), vector=EmbeddingVector([1.0, 0.0], {10: 1.0}))
+    with QdrantVectorIndex(path=path) as reopened:
+        assert reopened.documents()[0]["index_incomplete"]
+        reopened.delete_document("doc")
+        assert reopened.documents() == []
+        assert reopened.collection_schema()["points_count"] == 0
+
+
+def test_legacy_mixed_index_cannot_be_reported_current(tmp_path: Path) -> None:
+    with QdrantVectorIndex(path=tmp_path / "qdrant") as index:
+        vector = EmbeddingVector([1.0, 0.0], {10: 1.0})
+        _replace(index, document_id="doc", source_path="/source.txt", chunk=_chunk("1" * 32, "doc", 0, "old"), vector=vector)
+        records, _ = index.client.scroll(index.collection_name, with_vectors=True)
+        original = records[0]
+        index.client.upsert(index.collection_name, points=[models.PointStruct(
+            id="22222222-2222-2222-2222-222222222222", vector=original.vector,
+            payload={**original.payload, "content_hash": "different", "text": "new"},
+        )])
+        assert index.get_document("doc")["index_incomplete"]
+        assert not index.is_current("doc", "content-hash", "pipeline-signature")
+        with pytest.raises(StaleIndexError):
+            index.search(vector)

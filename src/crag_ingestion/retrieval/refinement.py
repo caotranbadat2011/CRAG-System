@@ -4,6 +4,7 @@ import re
 from copy import deepcopy
 from dataclasses import replace
 
+from ..chunking import slice_source_spans
 from ..config import RefinementConfig
 from ..models import Chunk, SearchResult
 from .diversity import KnowledgeStrip
@@ -65,6 +66,29 @@ class KnowledgeRefiner:
                     "retrieval_score": result.score,
                     "rerank_score": parent.hit.rerank_score,
                 }
+                # Narrow citations to the spans that actually intersect this strip,
+                # including any text inherited from the preceding chunk/page.
+                source_spans = chunk.metadata.get("source_spans")
+                if isinstance(source_spans, list):
+                    clipped = slice_source_spans(source_spans, start, end, offset=start)
+                    for span in clipped:
+                        span["strip_char_start"] = span["chunk_char_start"] - start
+                        span["strip_char_end"] = span["chunk_char_end"] - start
+                    source_metadata = []
+                    heading_paths = []
+                    for span in clipped:
+                        if span["source_metadata"] and span["source_metadata"] not in source_metadata:
+                            source_metadata.append(span["source_metadata"])
+                        if span["heading_path"] and span["heading_path"] not in heading_paths:
+                            heading_paths.append(span["heading_path"])
+                    metadata.update({
+                        "source_spans": clipped,
+                        "source_metadata": source_metadata,
+                        "pages": sorted({span["page"] for span in clipped if span["page"] is not None}),
+                        "heading_path": heading_paths[0] if heading_paths else [],
+                        "heading_paths": heading_paths,
+                        "has_overlap": any(span["is_overlap"] for span in clipped),
+                    })
                 strip = KnowledgeStrip(
                     strip_id=strip_id,
                     text=chunk.text[start:end],
@@ -78,8 +102,8 @@ class KnowledgeRefiner:
                     ordinal=chunk.ordinal,
                     text=strip.text,
                     char_count=len(strip.text),
-                    pages=chunk.pages,
-                    heading_path=chunk.heading_path,
+                    pages=tuple(metadata["pages"]),
+                    heading_path=tuple(metadata["heading_path"]),
                     metadata={"parent_chunk_id": chunk.chunk_id},
                 )
                 candidate = RerankedHit(

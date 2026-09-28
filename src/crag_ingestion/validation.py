@@ -69,6 +69,11 @@ def validate_index(index: QdrantVectorIndex, check_files: bool = True) -> Valida
 
     for document in documents:
         document_id = str(document["document_id"])
+        if document.get("index_incomplete"):
+            issues.append(ValidationIssue(
+                "error", "incomplete_update", "Document has an unfinished or inconsistent index update",
+                document_id,
+            ))
         actual = index.count_document_chunks(document_id)
         if actual != document["chunk_count"]:
             issues.append(

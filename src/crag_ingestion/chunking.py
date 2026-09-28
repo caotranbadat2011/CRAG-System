@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass
+from typing import Any
 
 from .config import ChunkingConfig
 from .models import Chunk, ParsedDocument, TextBlock
@@ -17,6 +19,33 @@ class _Piece:
     heading_path: tuple[str, ...]
     kind: str
     metadata: dict[str, object]
+    block_ordinal: int
+    block_char_start: int
+
+
+def slice_source_spans(
+    spans: list[dict[str, Any]], start: int, end: int, *, offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Clip exact chunk ranges while retaining offsets into the cleaned block.
+
+    Parser metadata still describes the original block's source range/bbox;
+    these offsets do not claim character precision in the original PDF.
+    """
+    result: list[dict[str, Any]] = []
+    for span in spans:
+        left = max(start, span["chunk_char_start"])
+        right = min(end, span["chunk_char_end"])
+        if left >= right:
+            continue
+        block_start = span["block_char_start"] + left - span["chunk_char_start"]
+        result.append({
+            **deepcopy(span),
+            "chunk_char_start": offset + left - start,
+            "chunk_char_end": offset + right - start,
+            "block_char_start": block_start,
+            "block_char_end": block_start + right - left,
+        })
+    return result
 
 
 class StructuralChunker:
@@ -55,20 +84,30 @@ class StructuralChunker:
 
         chunks: list[Chunk] = []
         previous_text = ""
+        previous_spans: list[dict[str, Any]] = []
         for ordinal, group in enumerate(groups):
             base_text = self._join(group)
+            base_spans = self._source_spans(group)
             overlap = self._tail(previous_text, self.config.overlap_chars) if ordinal else ""
             available = self.config.max_chars - len(base_text) - (2 if overlap else 0)
             if overlap and available < len(overlap):
                 overlap = self._tail(overlap, max(0, available))
             text = f"{overlap}\n\n{base_text}" if overlap else base_text
-            text = text.strip()
-            pages = tuple(sorted({piece.page for piece in group if piece.page is not None}))
-            heading_path = next((piece.heading_path for piece in group if piece.heading_path), ())
+            source_spans = slice_source_spans(
+                previous_spans, len(previous_text) - len(overlap), len(previous_text),
+            ) if overlap else []
+            for span in source_spans:
+                span["is_overlap"] = True
+            source_spans.extend(slice_source_spans(
+                base_spans, 0, len(base_text), offset=len(overlap) + 2 if overlap else 0,
+            ))
+            pages = tuple(sorted({span["page"] for span in source_spans if span["page"] is not None}))
+            heading_path = next((tuple(span["heading_path"]) for span in source_spans if span["heading_path"]), ())
             source_metadata: list[dict[str, object]] = []
-            for piece in group:
-                if piece.metadata and piece.metadata not in source_metadata:
-                    source_metadata.append(piece.metadata)
+            for span in source_spans:
+                metadata = span["source_metadata"]
+                if metadata and metadata not in source_metadata:
+                    source_metadata.append(deepcopy(metadata))
             chunk_id = stable_chunk_id(document_id, ordinal, text)
             chunks.append(
                 Chunk(
@@ -80,40 +119,77 @@ class StructuralChunker:
                     pages=pages,
                     heading_path=heading_path,
                     metadata={
-                        "kinds": sorted({piece.kind for piece in group}),
+                        "kinds": sorted({span["kind"] for span in source_spans}),
                         "has_overlap": bool(overlap),
                         "source_metadata": source_metadata,
+                        "source_spans": source_spans,
                     },
                 )
             )
             previous_text = base_text
+            previous_spans = base_spans
         return chunks
 
     def _split_block(self, block: TextBlock) -> list[_Piece]:
         if len(block.text) <= self.config.max_chars:
-            return [_Piece(block.text, block.page, block.heading_path, block.kind, block.metadata)]
-        sentences = [part.strip() for part in _SENTENCE_BOUNDARY.split(block.text) if part.strip()]
+            piece = self._piece(block, 0, len(block.text))
+            return [piece] if piece else []
         pieces: list[_Piece] = []
-        for sentence in sentences or [block.text]:
-            while len(sentence) > self.config.max_chars:
-                cut = sentence.rfind(" ", 0, self.config.max_chars + 1)
-                if cut < self.config.max_chars // 2:
-                    cut = self.config.max_chars
-                pieces.append(
-                    _Piece(
-                        sentence[:cut].strip(),
-                        block.page,
-                        block.heading_path,
-                        block.kind,
-                        block.metadata,
-                    )
-                )
-                sentence = sentence[cut:].strip()
-            if sentence:
-                pieces.append(
-                    _Piece(sentence, block.page, block.heading_path, block.kind, block.metadata)
-                )
+        cursor = 0
+        ranges: list[tuple[int, int]] = []
+        for boundary in _SENTENCE_BOUNDARY.finditer(block.text):
+            ranges.append((cursor, boundary.start()))
+            cursor = boundary.end()
+        ranges.append((cursor, len(block.text)))
+        for start, end in ranges:
+            while start < end:
+                while start < end and block.text[start].isspace():
+                    start += 1
+                if end - start > self.config.max_chars:
+                    cut = block.text.rfind(" ", start, start + self.config.max_chars + 1)
+                    if cut - start < self.config.max_chars // 2:
+                        cut = start + self.config.max_chars
+                else:
+                    cut = end
+                piece = self._piece(block, start, cut)
+                if piece:
+                    pieces.append(piece)
+                start = cut
         return pieces
+
+    @staticmethod
+    def _piece(block: TextBlock, start: int, end: int) -> _Piece | None:
+        while start < end and block.text[start].isspace():
+            start += 1
+        while end > start and block.text[end - 1].isspace():
+            end -= 1
+        if start == end:
+            return None
+        return _Piece(
+            block.text[start:end], block.page, block.heading_path, block.kind,
+            block.metadata, block.ordinal, start,
+        )
+
+    @staticmethod
+    def _source_spans(group: list[_Piece]) -> list[dict[str, Any]]:
+        spans: list[dict[str, Any]] = []
+        cursor = 0
+        for piece in group:
+            spans.append({
+                "chunk_char_start": cursor,
+                "chunk_char_end": cursor + len(piece.text),
+                "block_ordinal": piece.block_ordinal,
+                "block_char_start": piece.block_char_start,
+                "block_char_end": piece.block_char_start + len(piece.text),
+                "offset_basis": "cleaned_block",
+                "page": piece.page,
+                "heading_path": list(piece.heading_path),
+                "kind": piece.kind,
+                "source_metadata": deepcopy(piece.metadata),
+                "is_overlap": False,
+            })
+            cursor += len(piece.text) + 2
+        return spans
 
     @staticmethod
     def _join(group: list[_Piece]) -> str:
